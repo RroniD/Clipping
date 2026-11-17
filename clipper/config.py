@@ -8,7 +8,10 @@ Why defaults in code AND a config file?
 from __future__ import annotations
 
 import copy
-import tomllib  # built into Python 3.11+, so no extra dependency
+try:
+    import tomllib  # built into Python 3.11+
+except ModuleNotFoundError:  # Python 3.10: same reader, installed from pip as "tomli"
+    import tomli as tomllib
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

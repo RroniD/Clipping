@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,7 +50,11 @@ def parse_time(text: str | None) -> datetime | None:
     plain ('2026-11-17 18:00:00', which is UTC). Returns an aware UTC datetime."""
     if not text:
         return None
-    dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    text = text.strip().replace("Z", "+00:00")
+    # Python 3.10's fromisoformat only accepts exactly 3 or 6 digits after the seconds,
+    # so pad or cut fractions like ".12" or ".123456789" to 6 digits.
+    text = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], text)
+    dt = datetime.fromisoformat(text)
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 

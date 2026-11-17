@@ -31,7 +31,7 @@ VOD URL ─► audio only (yt-dlp) ─► loudness per second ─┐
 
 ```powershell
 cd $HOME\OneDrive\Desktop\Clipping
-py -3.11 -m venv .venv
+py -m venv .venv               # Python 3.10 or newer
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 

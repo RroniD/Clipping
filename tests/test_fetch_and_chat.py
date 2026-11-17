@@ -46,3 +46,9 @@ def test_repo_config_files_load():
     assert cfg["peaks"]["threshold"] == 2.5
     assert cfg["signals"]["floor"]["chat"] > 0
     assert isinstance(load_streamers(), dict)
+
+
+def test_parse_time_handles_odd_fractions():
+    # Python 3.10 rejects fractions that aren't 3 or 6 digits unless we normalise them.
+    assert parse_time("2026-11-17T18:01:30.12Z").microsecond == 120000
+    assert parse_time("2026-11-17T18:01:30.123456789+00:00").microsecond == 123456
