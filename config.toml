@@ -1,0 +1,83 @@
+# All tunable numbers live here, not in the code.
+# Anything you leave out falls back to the default in clipper/config.py.
+
+[general]
+top_n = 15                 # max number of candidates per VOD
+
+[chat]
+lag_seconds = 6            # chat reacts this many seconds after the moment; we shift chat earlier
+smooth_seconds = 5         # messages are summed over a window this wide
+baseline_seconds = 300     # rolling window for the robust z-score
+hype_ratio = 0.5           # a message is "hype" if at least this share of its words are hype words
+hype_words = ["kekw", "omegalul", "lul", "lmao", "lmfao", "pog", "pogchamp", "poggers", "pogu",
+              "w", "ww", "www", "monkas", "pepelaugh", "icant", "sadge", "holy", "wtf", "bro",
+              "💀", "😂", "🤣", "😭", "🔥"]
+hype_phrases = ["clip it", "clip that", "no way", "oh my god", "omg"]
+
+[audio]
+sample_rate = 8000         # 8 kHz is plenty for loudness and keeps it fast
+baseline_seconds = 300
+
+[signals]
+# The robust z-score divides by the spread of the signal. When chat is dead the spread is 0,
+# so one message would look like a giant spike. The floor is the smallest spread we allow.
+floor = { chat = 3.0, unique = 2.0, hype = 1.0, audio = 2.0, viewer_clips = 0.5 }
+viewer_clip_sigma = 8      # seconds; width of the bump each viewer clip adds
+viewer_clip_center = 0.6   # bump sits at vod_offset + this x clip duration
+
+[weights]
+chat = 1.0
+unique = 0.8
+hype = 1.2
+audio = 0.7
+viewer_clips = 1.5
+
+[scoring]
+z_cap = 8                  # each z-score is clipped to [0, z_cap] so one signal can't dominate
+both_bonus = 0.5           # bonus x min(z_audio, z_chat) when both spike together
+smooth_seconds = 3
+
+[peaks]
+threshold = 2.5
+min_gap_seconds = 45
+
+[clip]
+min_seconds = 15
+max_seconds = 60
+target_seconds = 30
+pre_roll = 12              # start this many seconds before the peak
+build_up_max = 20          # may extend back this much more while score stays high
+post_roll = 3              # extra seconds after the score falls off
+tail_max = 45              # end at most this many seconds after the peak (before post_roll)
+decay_ratio = 0.35         # "score is still high" means above this share of the peak
+keep_before_ratio = 0.45   # when trimming a too-long clip, keep this share before the peak
+snap_back_max = 8          # move start back at most this far to reach a sentence start
+snap_forward_max = 6       # move end forward at most this far to reach a sentence end
+peak_guard = 3             # the clip never starts later than peak - this
+
+[whisper]
+model = "large-v3"
+device = "cuda"
+compute_type = "int8_float16"
+window_padding = 10        # transcribe this many seconds around each rough clip
+fallback_model = "small"   # used on CPU if the GPU setup fails
+sentence_gap = 0.8         # a pause this long (s) also ends a sentence
+
+[judge]
+# Stage 1b: the AI model rates each candidate, writes a hook/title and flags spoilers.
+# Needs ANTHROPIC_API_KEY in .env. Run with --no-judge to skip it.
+enabled = true
+model = "claude-opus-5-5"     # cheaper option: "claude-haiku-5-5"
+effort = "low"                # how hard the model thinks: low / medium / high
+max_candidates = 20           # only the best N candidates are judged, to keep cost down
+max_tokens = 4000
+chat_sample = 25              # how many chat messages from the clip the model sees
+fallbacks = true              # if the model declines a clip, retry on a fallback model
+warn_on = ["low", "high"]     # spoiler_risk levels that get the warning flag
+cutscene_quiet_seconds = 12   # flag clips with this many seconds of no speech + quiet chat
+chat_quiet_z = 0.0            # "quiet chat" = chat z-score at or below this
+neutral_score = 5             # AI score used for clips that couldn't be judged
+
+[download]
+padding = 2                # extra seconds on both sides of each preview
+preview_format = "bv*[height<=720]+ba/b[height<=720]/b"
