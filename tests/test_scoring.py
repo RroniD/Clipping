@@ -45,7 +45,8 @@ def test_rough_bounds_follow_decay():
     score[90:131] = 5          # build-up and reaction around the peak
     score[120] = 10
     start, end = rough_bounds(score, 120, CLIP)
-    assert start == 90         # extended back past pre_roll while score > 35% of peak
+    # pre_roll is 8 s (112), extended back while score > 35% of peak, at most build_up_max (20 s) more
+    assert start == 92
     assert end == 130 + CLIP["post_roll"]
 
 

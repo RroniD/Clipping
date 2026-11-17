@@ -24,11 +24,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from clipper import fetch
-from clipper.config import PROJECT_ROOT, load_config, load_streamers
+from clipper.config import PROJECT_ROOT, load_campaigns, load_config, load_streamers
 
 OUT_W, OUT_H = 1080, 1920   # 9:16 output size
 
@@ -99,31 +103,33 @@ def facecam_height(cfg: dict) -> int:
     return int(round(OUT_H * cfg["edit"]["facecam_share"] / 2)) * 2   # even number for H.264
 
 
-def video_filter(layout: Layout, cfg: dict) -> str:
-    """The video part of ffmpeg's filter_complex. Input is [0:v], output is [base]."""
+def video_filter(layout: Layout, cfg: dict, inp: str = "[0:v]") -> str:
+    """The video part of ffmpeg's filter_complex. Input is `inp` ([0:v]), output is [base]."""
     fps = cfg["edit"]["fps"]
     if layout.mode == "split":
         top = facecam_height(cfg)
-        return (f"[0:v]split=2[fc][gp];"
+        return (f"{inp}split=2[fc][gp];"
                 f"[fc]{_crop(layout.facecam)},{_fill(OUT_W, top)},setsar=1[top];"
                 f"[gp]{_crop(layout.gameplay)},{_fill(OUT_W, OUT_H - top)},setsar=1[bot];"
                 f"[top][bot]vstack=inputs=2,fps={fps}[base]")
     if layout.mode == "crop":
-        return f"[0:v]{_crop(layout.gameplay)},{_fill(OUT_W, OUT_H)},setsar=1,fps={fps}[base]"
+        return f"{inp}{_crop(layout.gameplay)},{_fill(OUT_W, OUT_H)},setsar=1,fps={fps}[base]"
     # no_facecam: the gameplay fits the width in the middle; above and below is a blurred,
     # darker, zoomed-in copy of the same picture. The blur is done on a small copy (270x480)
     # and scaled back up because blurring at full size is slow and looks the same.
     blur = cfg["edit"]["blur_strength"]
-    return (f"[0:v]{_crop(layout.gameplay)},split=2[a][b];"
+    return (f"{inp}{_crop(layout.gameplay)},split=2[a][b];"
             f"[a]{_fill(270, 480)},boxblur={blur}:2,scale={OUT_W}:{OUT_H},eq=brightness=-0.12[bg];"
             f"[b]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease[fg];"
             f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,fps={fps}[base]")
 
 
 def text_positions(layout: Layout, cfg: dict) -> dict[str, int]:
-    """Vertical centre (in output pixels) of the captions and hook.
+    """Where text goes (output pixels), always inside the SAFE ZONE.
 
-    Platform buttons cover the bottom ~20% and the right edge, so nothing goes there.
+    TikTok / Shorts / Reels draw their own buttons, captions and progress bar over the video:
+    roughly the top 15%, the bottom 35% and a strip on the right. Anything important must sit
+    in the box safe_left..safe_right x safe_top..safe_bottom (default 120-888 x 288-1248).
     split: captions sit on the line between facecam and gameplay (eyes are already there).
     """
     e = cfg["edit"]
@@ -133,7 +139,10 @@ def text_positions(layout: Layout, cfg: dict) -> dict[str, int]:
         caption_y = int(OUT_H * e["caption_y_no_facecam"])
     else:
         caption_y = int(OUT_H * e["caption_y_crop"])
-    return {"caption": caption_y, "hook": int(OUT_H * e["hook_y"])}
+    caption_y = min(max(caption_y, e["safe_top"] + 60), e["safe_bottom"] - 60)
+    hook_y = min(max(int(OUT_H * e["hook_y"]), e["safe_top"] + 40), e["safe_bottom"] - 40)
+    return {"caption": caption_y, "hook": hook_y, "x": (e["safe_left"] + e["safe_right"]) // 2,
+            "disclosure": hook_y + 90, "credit_x": e["safe_left"], "credit_y": e["safe_bottom"]}
 
 
 # --------------------------------------------------------------------------- captions (.ass)
@@ -180,7 +189,7 @@ def chunk_words(words: list[dict], max_words: int = 3, max_chars: int = 16,
         if i + 1 < len(chunks):
             end = min(end, chunks[i + 1][0]["start"])  # but never overlap the next chunk
         end = max(end, start + 0.25)                   # and never flash by too fast to read
-        result.append({"start": start, "end": end, "text": " ".join(x["text"] for x in c)})
+        result.append({"start": start, "end": end, "text": " ".join(x["text"] for x in c), "words": c})
     return result
 
 
@@ -202,12 +211,19 @@ def _caption_text(text: str, upper: bool) -> str:
 
 
 def build_ass(chunks: list[dict], duration: float, hook: str, credit: str,
-              positions: dict[str, int], cfg: dict) -> str:
-    """Write the whole subtitle file: caption chunks, the hook box and the credit line.
+              positions: dict[str, int], cfg: dict, banner: str = "", disclosure: str = "",
+              disclosure_seconds: float = 0.0) -> str:
+    """Write the whole subtitle file: captions, hook, context banner, disclosure and credit.
 
     Colours in ASS are &HAABBGGRR (alpha first, then blue-green-red, alpha 00 = solid).
-    Alignment 5 = centred on the \\pos point; 1 = bottom-left.
-    BorderStyle 3 = solid box behind the text (used for the hook).
+    Alignment 5 = centred on the \\pos point; 1 = bottom-left; 8 = top-centre.
+    BorderStyle 3 = solid box behind the text (used for the hook and the banner).
+
+    Captions: the chunk (2-3 words) stays on screen and the word being SPOKEN turns yellow,
+    the style most viral clips use (it pulls the eye along and works on mute). Each chunk
+    appears `caption_lead` (0.1 s) early, because text that appears exactly with the sound
+    feels late. A chunk "pops" in (110% -> 100% size) to catch the eye.
+    The hook (first ~2 s) and then the banner (context line) share the top spot.
     """
     e = cfg["edit"]
     font = e["font"]
@@ -223,24 +239,45 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: Caption,{font},{e['caption_size']},&H00FFFFFF,&H00FFFFFF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,7,3,5,80,80,0,1
 Style: Hook,{font},{e['hook_size']},&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,3,22,0,5,110,110,0,1
 Style: Credit,{font},{e['credit_size']},&H30FFFFFF,&H30FFFFFF,&H60000000,&H00000000,-1,0,0,0,100,100,0,0,1,3,0,1,40,40,0,1
+Style: Banner,{font},{e['banner_size']},&H00FFFFFF,&H00FFFFFF,&HB4000000,&HB4000000,-1,0,0,0,100,100,0,0,3,14,0,5,{e['safe_left']},{OUT_W - e['safe_right']},0,1
+Style: Disclosure,Arial,30,&H00FFFFFF,&H00FFFFFF,&H90000000,&H90000000,-1,0,0,0,100,100,0,0,3,8,0,8,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = []
-    cx, cy, hy = OUT_W // 2, positions["caption"], positions["hook"]
+    cx, cy, hy = positions["x"], positions["caption"], positions["hook"]
+    lead, hl, upper = float(e["caption_lead"]), e["caption_highlight"], e["caption_uppercase"]
     for c in chunks:
-        lines.append(f"Dialogue: 1,{_ass_time(c['start'])},{_ass_time(c['end'])},Caption,,0,0,0,,"
-                     f"{{\\pos({cx},{cy})}}{_ass_text(_caption_text(c['text'], e['caption_uppercase']))}")
+        words = c.get("words") or [{"start": c["start"], "end": c["end"], "text": c["text"]}]
+        texts = [_ass_text(_caption_text(w["text"], upper)) for w in words]
+        for i, w in enumerate(words):
+            # One event per spoken word: same chunk, with word i highlighted.
+            a = (c["start"] if i == 0 else w["start"]) - lead
+            b = (words[i + 1]["start"] if i + 1 < len(words) else c["end"]) - lead
+            if b - a < 0.05:
+                continue
+            shown = " ".join(f"{{\\c{hl}}}{t}{{\\c&HFFFFFF&}}" if k == i else t for k, t in enumerate(texts))
+            pop = "\\fscx110\\fscy110\\t(0,80,\\fscx100\\fscy100)" if i == 0 else ""
+            lines.append(f"Dialogue: 1,{_ass_time(a)},{_ass_time(b)},Caption,,0,0,0,,"
+                         f"{{\\pos({cx},{cy}){pop}}}{shown}")
+    hook_end = min(e["hook_seconds"], duration) if hook else 0.0
     if hook:
         # \fad(0,200): no fade in (it must be readable on the very first frame), 0.2 s fade out.
-        lines.append(f"Dialogue: 2,{_ass_time(0)},{_ass_time(min(e['hook_seconds'], duration))},Hook,,0,0,0,,"
+        lines.append(f"Dialogue: 2,{_ass_time(0)},{_ass_time(hook_end)},Hook,,0,0,0,,"
                      f"{{\\pos({cx},{hy})\\fad(0,200)}}{_ass_text(hook)}")
+    if banner and e["banner"]:
+        # The context line: tells a stranger who and what this is, for the rest of the clip.
+        lines.append(f"Dialogue: 2,{_ass_time(hook_end)},{_ass_time(duration)},Banner,,0,0,0,,"
+                     f"{{\\pos({cx},{hy})\\fad(150,0)}}{_ass_text(banner)}")
+    if disclosure and disclosure_seconds > 0:
+        # Campaign disclosure ("#ad", "Sponsored by ...") burned into the opening seconds.
+        lines.append(f"Dialogue: 3,{_ass_time(0)},{_ass_time(min(disclosure_seconds, duration))},Disclosure,,0,0,0,,"
+                     f"{{\\an8\\pos({cx},{positions['disclosure']})}}{_ass_text(disclosure)}")
     if credit:
-        # Bottom-left, just above the platform UI zone (bottom 20% of the screen).
-        credit_y = int(OUT_H * (1 - e["ui_bottom_share"])) - 10
+        # Bottom-left corner of the safe zone.
         lines.append(f"Dialogue: 0,{_ass_time(0)},{_ass_time(duration)},Credit,,0,0,0,,"
-                     f"{{\\an1\\pos(40,{credit_y})}}{_ass_text(credit)}")
+                     f"{{\\an1\\pos({positions['credit_x']},{positions['credit_y']})}}{_ass_text(credit)}")
     return head + "\n".join(lines) + "\n"
 
 
@@ -314,9 +351,92 @@ def audio_filter(words: list[dict], duration: float, cfg: dict, measured: dict |
 
 # --------------------------------------------------------------------------- rendering
 
+# --------------------------------------------------------------------------- pacing: dead air, teaser, zoom
+
+def clip_levels(source: Path, offset: float, duration: float, step: float = 0.1) -> np.ndarray:
+    """Loudness (dB) of the clip's audio every `step` seconds (decoded at 8 kHz, it's quick)."""
+    ffmpeg = fetch.require_tool("ffmpeg", "Install it with: winget install Gyan.FFmpeg")
+    result = subprocess.run([ffmpeg, "-v", "error", "-ss", f"{offset:.3f}", "-t", f"{duration:.3f}",
+                             "-i", str(source), "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
+                            capture_output=True)
+    samples = np.frombuffer(result.stdout[: len(result.stdout) // 2 * 2], dtype=np.int16).astype(np.float64)
+    n = int(8000 * step)
+    if len(samples) < n:
+        return np.zeros(0)
+    blocks = samples[: len(samples) // n * n].reshape(-1, n)
+    rms = np.sqrt((blocks ** 2).mean(axis=1)) / 32768.0
+    return 20 * np.log10(np.maximum(rms, 10 ** (-90 / 20)))
+
+
+def plan_segments(words: list[dict], duration: float, peak: float, levels: np.ndarray, cfg: dict,
+                  step: float = 0.1) -> list[tuple[float, float]]:
+    """Which parts of the clip to KEEP, as (start, end) in clip seconds.
+
+    Dead air = a pause in speech longer than `dead_air_gap` where the game is also quiet
+    (a few dB below the clip's typical level). Those get cut down to a short breath.
+    Why "game also quiet"? A silent streamer during a car chase is not dead air: the action
+    is the point. And we never cut within 3 s before / 4 s after the peak (the moment itself).
+    Faster pacing keeps people watching (retention is what the platforms reward).
+    """
+    e = cfg["edit"]
+    if not e["dead_air"] or not words or len(levels) == 0:
+        return [(0.0, duration)]
+    typical = float(np.median(levels))
+    keep_air = float(e["dead_air_keep"])
+    cuts = []
+    edges = [(-1.0, 0.0)] + [(w["start"], w["end"]) for w in sorted(words, key=lambda w: w["start"])] \
+        + [(duration, duration + 1)]
+    for (_, prev_end), (next_start, _) in zip(edges, edges[1:]):
+        a, b = max(0.0, prev_end + keep_air), min(duration, next_start - keep_air)
+        if b - a < e["dead_air_gap"] - 2 * keep_air:
+            continue
+        if a < peak + 4 and b > peak - 3:
+            continue                                      # never touch the moment itself
+        quiet = levels[int(a / step): max(int(a / step) + 1, int(b / step))]
+        if len(quiet) and float(np.mean(quiet)) <= typical - e["dead_air_quiet_db"]:
+            cuts.append((a, b))
+    keep, t = [], 0.0
+    for a, b in cuts:
+        if a > t:
+            keep.append((t, a))
+        t = b
+    if t < duration:
+        keep.append((t, duration))
+    return [(round(a, 2), round(b, 2)) for a, b in keep if b - a > 0.05] or [(0.0, duration)]
+
+
+def remap(t: float, segments: list[tuple[float, float]], lead_in: float = 0.0) -> float | None:
+    """Clip time -> time in the edited video (after cutting dead air and adding a teaser).
+    None if that moment was cut out."""
+    out = lead_in
+    for a, b in segments:
+        if a <= t <= b:
+            return out + (t - a)
+        out += b - a
+    return None
+
+
+def remap_words(words: list[dict], segments: list[tuple[float, float]], lead_in: float = 0.0) -> list[dict]:
+    result = []
+    for w in words:
+        s, e = remap(w["start"], segments, lead_in), remap(w["end"], segments, lead_in)
+        if s is not None and e is not None and e > s:
+            result.append({**w, "start": s, "end": e})
+    return result
+
+
+# --------------------------------------------------------------------------- rendering
+
 def render_clip(source: Path, offset: float, duration: float, layout: Layout, ass_path: Path,
-                words: list[dict], out_path: Path, cfg: dict) -> Path:
+                words: list[dict], out_path: Path, cfg: dict,
+                segments: list[tuple[float, float]] | None = None, zoom_at: float | None = None,
+                audio_file: Path | None = None, safe_overlay: bool = False) -> Path:
     """Render one finished clip with a single ffmpeg call.
+
+    segments: the parts of [0, duration] to keep, in order (dead air cut out; a teaser is just
+      an extra segment at the front). Each is cut with trim/atrim and they're joined with concat.
+    zoom_at: time in the EDITED video for a short punch-in zoom (the peak reaction).
+    audio_file: replacement audio for the clip (music removed), same timeline as the clip.
 
     The subtitles filter is given the .ass file by its bare name and ffmpeg runs with
     cwd = that folder. Why: inside a filter string, "C:\\..." needs the colon and every
@@ -324,21 +444,102 @@ def render_clip(source: Path, offset: float, duration: float, layout: Layout, as
     """
     ffmpeg = fetch.require_tool("ffmpeg", "Install it with: winget install Gyan.FFmpeg")
     e = cfg["edit"]
+    segments = segments or [(0.0, duration)]
+    a_in = "[1:a]" if audio_file else "[0:a]"
     measured = measure_loudness(source.resolve(), offset, duration,
                                 duck_filter(words, duration, e["duck_music_db"]), cfg)
-    graph = (video_filter(layout, cfg) + ";"
-             f"[base]subtitles={ass_path.name}[vout];"
-             + audio_filter(words, duration, cfg, measured))
+    parts = []
+    if segments == [(0.0, duration)]:
+        v_label, a_label = "[0:v]", a_in
+    else:
+        # split/asplit: one copy of the picture and sound per piece we keep.
+        n = len(segments)
+        parts.append("[0:v]split=" + str(n) + "".join(f"[sv{i}]" for i in range(n)))
+        parts.append(f"{a_in}asplit=" + str(n) + "".join(f"[sa{i}]" for i in range(n)))
+        joins = ""
+        for i, (a, b) in enumerate(segments):
+            parts.append(f"[sv{i}]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS[v{i}]")
+            parts.append(f"[sa{i}]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS[a{i}]")
+            joins += f"[v{i}][a{i}]"
+        parts.append(f"{joins}concat=n={len(segments)}:v=1:a=1[vcat][acat]")
+        v_label, a_label = "[vcat]", "[acat]"
+    parts.append(video_filter(layout, cfg, v_label))
+    last = "[base]"
+    if zoom_at is not None and e["zoom"]:
+        # Punch-in: for a moment the whole picture is scaled up ~12% (centre crop), a classic
+        # editing trick that makes the reaction land. eval=frame re-evaluates the size per frame.
+        z, a, b = float(e["zoom_factor"]), max(0.0, zoom_at - 0.15), zoom_at + float(e["zoom_seconds"])
+        zw, zh = int(round(OUT_W * z / 2) * 2), int(round(OUT_H * z / 2) * 2)
+        parts.append(f"{last}scale=w='if(between(t,{a:.2f},{b:.2f}),{zw},{OUT_W})'"
+                     f":h='if(between(t,{a:.2f},{b:.2f}),{zh},{OUT_H})':eval=frame,crop={OUT_W}:{OUT_H}[zoomed]")
+        last = "[zoomed]"
+    if safe_overlay:
+        # Debug: green box = the safe zone where important things must be.
+        parts.append(f"{last}drawbox=x={e['safe_left']}:y={e['safe_top']}:w={e['safe_right'] - e['safe_left']}"
+                     f":h={e['safe_bottom'] - e['safe_top']}:color=lime@0.7:t=4[safe]")
+        last = "[safe]"
+    parts.append(f"{last}subtitles={ass_path.name}[vout]")
+    duck = duck_filter(words, duration, e["duck_music_db"]) if segments == [(0.0, duration)] else ""
+    parts.append(f"{a_label}{duck}{_loudnorm(cfg, measured)},aresample=48000[aout]")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [ffmpeg, "-v", "error", "-y",
-           "-ss", f"{offset:.3f}", "-i", str(source.resolve()), "-t", f"{duration:.3f}",
-           "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
-           "-c:v", "libx264", "-preset", e["preset"], "-crf", str(e["crf"]), "-pix_fmt", "yuv420p",
-           # 0 = use every CPU core. Live mode sets fewer so a game/stream on the laptop stays smooth.
-           "-threads", str(e.get("threads", 0)),
-           "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out_path.resolve())]
+    # -ss and -t BEFORE -i: ffmpeg only reads that stretch of the source (fast, and the
+    # clip's timestamps start at 0, so trims and subtitles use clip time).
+    cmd = [ffmpeg, "-v", "error", "-y", "-ss", f"{offset:.3f}", "-t", f"{duration:.3f}",
+           "-i", str(source.resolve())]
+    if audio_file:
+        cmd += ["-i", str(audio_file.resolve())]
+    cmd += ["-filter_complex", ";".join(parts), "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "libx264", "-preset", e["preset"], "-crf", str(e["crf"]), "-pix_fmt", "yuv420p",
+            # 0 = use every CPU core. Live mode sets fewer so a game/stream on the laptop stays smooth.
+            "-threads", str(e.get("threads", 0)),
+            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out_path.resolve())]
     fetch.run(cmd, cwd=str(ass_path.parent))
     return out_path
+
+
+def save_cover(video: Path, at: float, out: Path) -> Path | None:
+    """cover.jpg: the frame at the peak, for the platform's thumbnail picker."""
+    ffmpeg = fetch.require_tool("ffmpeg", "Install it with: winget install Gyan.FFmpeg")
+    result = subprocess.run([ffmpeg, "-v", "error", "-y", "-ss", f"{max(0.0, at):.2f}", "-i", str(video),
+                             "-frames:v", "1", "-q:v", "2", str(out)], capture_output=True)
+    return out if result.returncode == 0 and out.exists() else None
+
+
+# --------------------------------------------------------------------------- music removal (optional)
+
+def remove_music(source: Path, offset: float, duration: float, work: Path, cfg: dict) -> tuple[Path | None, str]:
+    """Optional: split the clip's audio into voice + everything else with Demucs and mix the
+    'everything else' (music AND game sounds) far down. Returns (audio file or None, warning).
+
+    Off unless audio.music_removal = "demucs" AND demucs is installed. Why optional: Demucs
+    needs PyTorch (~2.5 GB) and a few seconds of GPU per clip. Even with it, quiet music can
+    survive; the warning says when music was loud before removal (copyright-claim risk).
+    """
+    if cfg["audio"]["music_removal"] != "demucs":
+        return None, ""
+    try:
+        import demucs  # noqa: F401
+    except ImportError:
+        return None, ""
+    ffmpeg = fetch.require_tool("ffmpeg", "Install it with: winget install Gyan.FFmpeg")
+    work.mkdir(parents=True, exist_ok=True)
+    wav = work / f"{source.stem}_{offset:.0f}.wav"
+    subprocess.run([ffmpeg, "-v", "error", "-y", "-ss", f"{offset:.3f}", "-t", f"{duration:.3f}",
+                    "-i", str(source), "-vn", "-ac", "2", "-ar", "44100", str(wav)], check=True)
+    sep = subprocess.run([sys.executable, "-m", "demucs", "--two-stems=vocals", "-n", "htdemucs",
+                          "-o", str(work / "demucs"), str(wav)], capture_output=True, text=True)
+    stems = work / "demucs" / "htdemucs" / wav.stem
+    voice, rest = stems / "vocals.wav", stems / "no_vocals.wav"
+    if sep.returncode != 0 or not voice.exists():
+        return None, ""
+    v_db = float(np.mean(clip_levels(voice, 0, duration, 1.0)))
+    r_db = float(np.mean(clip_levels(rest, 0, duration, 1.0)))
+    warning = "loud background music (copyright-claim risk)" if r_db > v_db - 6 else ""
+    mixed = work / f"{wav.stem}_clean.wav"
+    subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(voice), "-i", str(rest), "-filter_complex",
+                    "[1:a]volume=-15dB[r];[0:a][r]amix=inputs=2:normalize=0[a]", "-map", "[a]", str(mixed)],
+                   check=True)
+    return mixed, warning
 
 
 def _words_for(d: dict, clip_start: float, clip_end: float) -> list[dict] | None:
@@ -351,7 +552,8 @@ def _words_for(d: dict, clip_start: float, clip_end: float) -> list[dict] | None
 
 def render_vod(out_dir: Path, cfg: dict, top_n: int | None = None, only: list[int] | None = None,
                include_warnings: bool = False, captions: bool = True,
-               layout_override: str | None = None) -> list[Path]:
+               layout_override: str | None = None, campaign: str | None = None,
+               safe_overlay: bool = False) -> list[Path]:
     """Make finished clips for one VOD folder (the one run.py wrote candidates.json into).
 
     layout_override: many streamers switch scenes (gameplay with facecam -> fullscreen camera),
@@ -369,6 +571,8 @@ def render_vod(out_dir: Path, cfg: dict, top_n: int | None = None, only: list[in
     for d in data["candidates"]:
         if only and d["rank"] not in only:
             continue
+        if not only and not d.get("kept", True):
+            continue   # the AI judge (or the explore picks) didn't keep this one
         if d.get("warning") and not include_warnings:
             # Hard rule 2: possible spoiler/cutscene clips are never turned into finished clips
             # unless you ask for it after looking at the preview.
@@ -382,7 +586,8 @@ def render_vod(out_dir: Path, cfg: dict, top_n: int | None = None, only: list[in
     finals = []
     for i, d in enumerate(picked, 1):
         print(f"  [{i}/{len(picked)}] {clip_name(d)} ({float(d['end']) - float(d['start']):.0f} s)")
-        finals.append(renderer.render(out_dir, data, d, layout_mode=layout_override, captions=captions))
+        finals.append(renderer.render(out_dir, data, d, layout_mode=layout_override, captions=captions,
+                                      campaign=campaign, safe_overlay=safe_overlay))
     return finals
 
 
@@ -424,10 +629,13 @@ class ClipRenderer:
     def render(self, out_dir: Path, data: dict, d: dict, start: float | None = None,
                end: float | None = None, layout_mode: str | None = None, hook: str | None = None,
                out_name: str | None = None, captions: bool = True,
-               source: Path | None = None, source_start: float = 0.0) -> Path:
+               source: Path | None = None, source_start: float = 0.0, banner: str | None = None,
+               campaign: str | None = None, safe_overlay: bool = False) -> Path:
         """Render candidate `d` of candidates.json `data` and return the finished .mp4.
 
-        start/end (VOD seconds), layout_mode and hook default to the candidate's own values.
+        start/end (VOD seconds), layout_mode, hook and banner (context line) default to the
+        candidate's own values. campaign: a profile name from campaigns.toml (its disclosure,
+        credit and length limit are applied).
         source/source_start: a video that's already on disk and starts at VOD second
         `source_start` (live mode cuts it from its own recording), instead of downloading.
         A small .json next to the .ass file records what was used, so the review queue knows.
@@ -438,8 +646,13 @@ class ClipRenderer:
         if streamer not in streamers:   # hard rule 3, checked again here
             raise SystemExit(f"Refusing to edit: {streamer} is not in streamers.toml.")
         layout = streamer_layout(streamers[streamer], layout_mode)
+        profile = load_campaigns().get(campaign) if campaign else None
+        if campaign and profile is None:
+            raise ValueError(f"no campaign called {campaign!r} in campaigns.toml")
         start = float(d["start"] if start is None else start)
         end = float(d["end"] if end is None else end)
+        if profile and profile.get("max_seconds") and end - start > profile["max_seconds"]:
+            end = start + float(profile["max_seconds"])   # the campaign's length limit wins
         duration = end - start
         name = out_name or clip_name(d)
 
@@ -457,25 +670,58 @@ class ClipRenderer:
         #    a fresh transcription to get captions for the extra seconds.
         words: list[dict] | None = []
         if captions:
-            inside = start >= float(d["start"]) - 0.05 and end <= float(d["end"]) + 0.05
+            lo, hi = d.get("words_range") or (float(d["start"]), float(d["end"]))
+            inside = start >= float(lo) - 0.05 and end <= float(hi) + 0.05
             words = _words_for(d, start, end) if inside else None
             if words is None:
                 words = self._transcribe(source, offset, duration)
 
-        # 3. Subtitle file (captions + hook + credit), then one ffmpeg render.
+        # 3. Pacing: cut dead air, optional teaser of the peak first, zoom on the peak.
+        peak = float(d.get("peak", start + duration / 2)) - start
+        levels = clip_levels(source, offset, duration) if e["dead_air"] else np.zeros(0)
+        segments = plan_segments(words, duration, peak, levels, cfg)
+        lead_in = 0.0
+        if e["teaser_seconds"] > 0 and 0 <= peak < duration:
+            t0 = max(0.0, peak - 0.3)
+            teaser = (round(t0, 2), round(min(duration, t0 + float(e["teaser_seconds"])), 2))
+            lead_in = teaser[1] - teaser[0]
+            segments = [teaser] + segments
+            main = segments[1:]
+        else:
+            main = segments
+        edited = sum(b - a for a, b in segments)
+        words_edit = remap_words(words, main, lead_in)
+        zoom_at = remap(peak, main, lead_in)
+
+        # 4. Subtitle file: captions, hook, context banner, campaign disclosure, credit.
+        ai = d.get("ai") or {}
         if hook is None:
-            hook = ((d.get("ai") or {}).get("hook") or "").strip() if e["hook"] else ""
-        credit = credit_text(streamer, platform) if e["credit"] else ""
-        chunks = chunk_words(words, e["caption_max_words"], e["caption_max_chars"], e["caption_gap"])
+            hook = (ai.get("hook") or "").strip() if e["hook"] else ""
+        if banner is None:
+            banner = (ai.get("context_line") or "").strip()
+        credit = (profile or {}).get("credit") or (credit_text(streamer, platform) if e["credit"] else "")
+        disclosure = (profile or {}).get("disclosure", "")
+        chunks = chunk_words(words_edit, e["caption_max_words"], e["caption_max_chars"], e["caption_gap"])
         work = out_dir / "final" / "work"
         work.mkdir(parents=True, exist_ok=True)
         ass_path = work / f"{name}.ass"
-        ass_path.write_text(build_ass(chunks, duration, hook, credit, text_positions(layout, cfg), cfg),
+        ass_path.write_text(build_ass(chunks, edited, hook, credit, text_positions(layout, cfg), cfg,
+                                      banner=banner, disclosure=disclosure,
+                                      disclosure_seconds=float((profile or {}).get("disclosure_seconds", 3))),
                             encoding="utf-8")
-        final = render_clip(source, offset, duration, layout, ass_path, words,
-                            out_dir / "final" / f"{name}.mp4", cfg)
+
+        # 5. Optional music removal, then one ffmpeg render, then the cover image.
+        audio_file, music_warning = remove_music(source, offset, duration, work, cfg)
+        final = render_clip(source, offset, duration, layout, ass_path, words, out_dir / "final" / f"{name}.mp4",
+                            cfg, segments=segments, zoom_at=zoom_at, audio_file=audio_file,
+                            safe_overlay=safe_overlay)
+        if e["cover"]:
+            save_cover(final, zoom_at if zoom_at is not None else min(1.0, edited / 2), final.with_suffix(".jpg"))
         (work / f"{name}.json").write_text(json.dumps(
-            {"rank": d["rank"], "start": start, "end": end, "layout": layout.mode, "hook": hook}),
+            {"rank": d["rank"], "start": start, "end": end, "layout": layout.mode, "hook": hook,
+             "banner": banner, "campaign": campaign, "duration": round(edited, 2),
+             "cuts": len(segments) - 1 - (1 if lead_in else 0),
+             "warnings": [music_warning] if music_warning else []}),
             encoding="utf-8")
         return final
 
@@ -570,6 +816,9 @@ def main() -> None:
     r.add_argument("--no-captions", action="store_true", help="skip captions (and Whisper)")
     r.add_argument("--layout", choices=["split", "no_facecam", "crop"],
                    help="use this layout instead of the streamer's (for clips from another scene)")
+    r.add_argument("--campaign", help="apply this campaign profile from campaigns.toml")
+    r.add_argument("--safe-overlay", action="store_true",
+                   help="debug: draw the safe zone (green box) on the clips")
     p.add_argument("--config", type=Path, help="use a different config.toml")
     args = p.parse_args()
 
@@ -584,7 +833,7 @@ def main() -> None:
         return
     only = [int(x) for x in args.only.split(",")] if args.only else None
     finals = render_vod(out_dir, cfg, args.top_n, only, args.include_warnings, not args.no_captions,
-                        args.layout)
+                        args.layout, args.campaign, args.safe_overlay)
     print(f"{len(finals)} finished clip(s) in {out_dir / 'final'}")
 
 
