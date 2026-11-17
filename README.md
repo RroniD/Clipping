@@ -159,7 +159,7 @@ while it's on the **same Wi-Fi** and the laptop is awake. Stop the queue with Ct
 
 On the page, each clip has:
 - the video, the AI's reason and the transcript, and a ⚠ box with the reasons if it's a possible spoiler/cutscene
-- **Title** (saved as you type; it's used for posting later) and **Hook** (the text on screen for the first 2 s)
+- **Title** (saved when you tap outside the box; it's used for posting later) and **Hook** (the text on screen for the first 2 s)
 - **Trim**: Start −2 s / +2 s and End −2 s / +2 s, and a **Layout** switch (facecam + gameplay / blurred
   background / full-screen crop). Then press **Re-render**. It takes up to a minute and the new video appears by itself.
 - **Approve** / **Reject** / **Back to pending**. Approve only marks the clip approved; **nothing is posted anywhere**.
