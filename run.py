@@ -257,6 +257,10 @@ def main() -> None:
         judge = Judge(cfg)
     judge_all(results, words_list, messages, z.get("chat"), cfg, streamer, info.get("title", ""), judge,
               frames_per_candidate=frames_list, viewer_clips=clips, vod_length=float(n_seconds))
+    if judge is not None:
+        cost = judge.cost()
+        print(f"    AI judge used {judge.tokens_in:,} input + {judge.tokens_out:,} output tokens"
+              + (f" = ${cost:.4f}" if cost is not None else ""))
     for d, words in zip(results, words_list):
         if words is not None:
             d["transcript"] = words_between(words, d["start"], d["end"])
@@ -299,6 +303,8 @@ def main() -> None:
             continue
         name = f"{d['rank']:02d}_{'WARN_' if d['warning'] else ''}{d['peak_time']}.mp4"
         try:
+            # A preview from an earlier run may have the same name but other bounds: replace it.
+            (out_dir / "previews" / name).unlink(missing_ok=True)
             path = fetch.download_section(args.url, max(0, d["start"] - pad), d["end"] + pad,
                                           out_dir / "previews" / name, cfg["download"]["preview_format"])
             d["preview"] = str(path.relative_to(out_dir))

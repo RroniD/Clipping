@@ -43,6 +43,9 @@ import numpy as np
 SPOILER_LEVELS = ("none", "low", "high")
 CATEGORIES = ("funny", "fail", "skill", "rage", "shock", "wholesome", "story", "hot_take", "banter", "other")
 REACTIONS = ("none", "mild", "big")
+# $ per million tokens (input, output), list prices Nov 2026. Haiku's price is for prompts up
+# to 100K tokens, which ours always are.
+PRICES = {"claude-haiku-5-5": (0.10, 0.50), "claude-sonnet-5-5": (2.0, 10.0), "claude-opus-5-5": (4.0, 20.0)}
 
 # JSON Schema the API must follow. "additionalProperties: false" + "required" means the
 # answer has exactly these fields, no more, no fewer.
@@ -332,6 +335,14 @@ class Judge:
             # Reads ANTHROPIC_API_KEY from the environment (.env is loaded by run.py / live.py).
             client = anthropic.Anthropic()
         self.client = client
+        self.tokens_in = self.tokens_out = 0
+
+    def cost(self) -> float | None:
+        """Dollars spent so far (list prices, Nov 2026; None for a model not in the table)."""
+        per_million = PRICES.get(self.cfg.model)
+        if per_million is None:
+            return None
+        return self.tokens_in / 1e6 * per_million[0] + self.tokens_out / 1e6 * per_million[1]
 
     def _ask(self, system: str, content, schema: dict, max_tokens: int | None = None) -> dict:
         request = dict(
@@ -350,6 +361,10 @@ class Judge:
             response = self.client.beta.messages.create(**request)
         else:
             response = self.client.messages.create(**request)
+        usage = getattr(response, "usage", None)
+        if usage is not None:   # add up what this run costs (printed at the end)
+            self.tokens_in += int(getattr(usage, "input_tokens", 0) or 0)
+            self.tokens_out += int(getattr(usage, "output_tokens", 0) or 0)
 
         if response.stop_reason == "refusal":
             raise JudgeOutputError("the model declined to rate this clip")

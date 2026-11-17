@@ -211,3 +211,47 @@ Good to know:
   and saves no clips (hard rule 3). Delete `out\_live_test` afterwards.
 - Twitch's "create clip" API isn't used: it needs a Twitch login (OAuth with `clips:edit`) and we already have the moment
   in our own recording.
+
+## Clip quality upgrades (how it picks and edits clips that go viral)
+
+What short-form platforms reward (research, Nov 2026): people decide in the first 1-3 s whether to swipe, and
+reach depends on how much of the clip gets watched. So the tool now:
+
+**Finds more, keeps the best.** The detector proposes ~40 moments per VOD (`general.top_n_detect`), the AI judge
+looks at all of them and 15 are kept (`general.top_n`). Two of those 15 slots are "explore" picks from ranks 16-30,
+so `python -m clipper.learn` can tell whether the ranking is actually right.
+
+**Cleaner chat signals.** Bots (Fossabot, Nightbot...), `!commands` and sub/raid notices are ignored; one person can
+count at most 2 messages per 5 s (some chatters send 500 per stream); a new `spam` signal catches waves of different
+people typing the same thing. Chat lag is measured per streamer from viewer clips (`out\<streamer>\calibration.json`)
+instead of assuming 6 s. When 2+ viewers clipped a moment, their median cut is the starting point.
+
+**An AI judge that watches.** For each moment the judge (default `claude-haiku-5-5`, about a cent per VOD) gets 15
+still frames, the transcript with timestamps, chat with timestamps and its mood mix (funny / hype / tense / confusion /
+fail), and the titles viewers gave their own clips. It returns: the exact cut (start on the action, end right after the
+payoff, on sentence edges), scores for "makes sense to a stranger", hook, payoff and visual payoff, the facecam
+reaction, whether it's a cutscene or a menu, a hook, a **context line**, a story-style title and hashtags. Then it ranks
+all moments of the stream against each other. Final score = signal^0.5 x AI^2 (the AI's opinion counts more than how
+loud chat was; set `signal_power`/`ai_power` to 1 for the original signal x AI).
+
+**No spoilers, stricter.** Warning flag (never posted without you checking) when: GTA 6 footage was recorded before the
+launch (`[launch]`), the frames show cinematic black bars, a loading/black screen or a hidden minimap (set `hud_box` per
+streamer to enable that one), the AI says cutscene or rates spoiler risk low/high (launch mode), or the AI refuses to
+rate a clip.
+
+**Editing that keeps people watching.** Captions highlight the word being spoken (yellow) and appear 0.1 s early;
+the hook shows for 2 s, then the context line stays as a banner (this added context is what makes a clip count as
+original on YouTube/Instagram); pauses where nobody talks AND the game is quiet are cut; a short punch-in zoom lands on
+the peak reaction; all text stays in the safe zone (x 120-888, y 288-1248 on 1080x1920; check with
+`python -m clipper.edit render <folder> --safe-overlay`); a `cover.jpg` (the peak frame) is saved next to each clip.
+Optional: `teaser_seconds` (show the peak first), `audio.music_removal = "demucs"` (needs `pip install demucs`, a ~2.5 GB
+PyTorch download; off by default and not installed).
+
+**Campaigns.** Put each campaign's rules in `campaigns.toml` (an example is inside, commented out). In the review queue
+pick a campaign per clip: the clip is re-rendered with its disclosure, credit and length limit, the queue shows its
+required tags and banned things, a 30-minute "post + submit" countdown starts when you approve, and you log each post
+link. One post link can belong to one campaign only.
+
+**Learning.** Every approve / reject / trim / edit is logged with the signals and AI ratings at that moment.
+`python -m clipper.learn` prints how your decisions line up with them and suggests new `[weights]`; it never changes
+`config.toml` itself.

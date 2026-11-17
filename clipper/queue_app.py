@@ -185,9 +185,24 @@ def import_clips(db: sqlite3.Connection, out_root: Path = OUT_ROOT) -> int:
                 if cur.rowcount:
                     added += 1
                 else:
-                    row = db.execute("SELECT id, video FROM clips WHERE streamer=? AND vod_id=? AND rank=?",
+                    row = db.execute("SELECT id, video, status FROM clips WHERE streamer=? AND vod_id=? AND rank=?",
                                      (data["streamer"], data["vod_id"], rank)).fetchone()
-                    if not (out_root / row["video"]).exists():
+                    touched = db.execute("SELECT COUNT(*) FROM events WHERE clip_id=?", (row["id"],)).fetchone()[0]
+                    if not (out_root / row["video"]).exists() and row["status"] == "pending" and not touched:
+                        # The VOD was processed again and you never touched this clip: show the new one.
+                        db.execute(
+                            """UPDATE clips SET video=?, peak_time=?, warning=?, warning_reasons=?, ai_score=?,
+                               ai_reason=?, hook=?, title=?, transcript=?, final_score=?, start=?, "end"=?, layout=?,
+                               category=?, hashtags=?, context_line=?, explore=?, peak_score=?, ai_json=?,
+                               breakdown_json=?, version=0, render_error='', updated_at=? WHERE id=?""",
+                            (video, d.get("peak_time"), int(bool(reasons)), json.dumps(reasons), ai.get("score"),
+                             ai.get("reason", ""), used.get("hook", ai.get("hook", "")), ai.get("title", ""),
+                             d.get("transcript", ""), d.get("final_score", d.get("peak_score")),
+                             used.get("start", d["start"]), used.get("end", d["end"]), used.get("layout", "split"),
+                             ai.get("category", ""), json.dumps(ai.get("hashtags", [])),
+                             used.get("banner", ai.get("context_line", "")), int(bool(d.get("explore"))),
+                             d.get("peak_score"), json.dumps(ai), json.dumps(d.get("breakdown", {})), now, row["id"]))
+                    elif not (out_root / row["video"]).exists():
                         db.execute("UPDATE clips SET video=?, updated_at=? WHERE id=?", (video, now, row["id"]))
     return added
 
