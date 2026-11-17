@@ -1,0 +1,12 @@
+# Secrets: API keys live here and must never be committed (CLAUDE.md hard rule 5).
+.env
+
+# Everything the tool produces (audio, chat, previews, plots). Can be many GB.
+out/
+
+# Python clutter
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
