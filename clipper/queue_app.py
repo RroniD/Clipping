@@ -64,9 +64,9 @@ CREATE TABLE IF NOT EXISTS clips (
     version         INTEGER NOT NULL DEFAULT 0,   -- bumped on every re-render (cache-busting)
     created_at      REAL NOT NULL,
     updated_at      REAL NOT NULL,
-    decided_at      REAL,
-    UNIQUE (streamer, vod_id, rank)
+    decided_at      REAL
 );
+CREATE INDEX IF NOT EXISTS clips_by_vod ON clips (streamer, vod_id, rank);
 
 -- Every decision you make, with what the tool knew at that moment (signals + AI ratings).
 -- python -m clipper.learn reads this to see which signals predict the clips you approve.
@@ -114,6 +114,20 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # Every write goes through `with db:` blocks under one lock, so that is safe here.
     db = sqlite3.connect(str(db_path), check_same_thread=False)
     db.row_factory = sqlite3.Row
+    old = db.execute("SELECT sql FROM sqlite_master WHERE name='clips'").fetchone()
+    if old and "UNIQUE (streamer, vod_id, rank)" in old["sql"]:
+        # Older queue.db: it allowed only one clip per rank number, so a re-processed VOD couldn't
+        # add a new moment with a rank that's already used. SQLite can't drop a rule in place, so
+        # the table is copied into one without it (all rows, ids and decisions kept).
+        db.executescript("ALTER TABLE clips RENAME TO clips_old;")
+        db.executescript(SCHEMA)
+        cols = [r["name"] for r in db.execute("PRAGMA table_info(clips_old)")]
+        have_new = {r["name"] for r in db.execute("PRAGMA table_info(clips)")}
+        for name, kind in EXTRA_COLUMNS.items():
+            if name not in have_new:
+                db.execute(f"ALTER TABLE clips ADD COLUMN {name} {kind}")
+        quoted = ", ".join(f'"{c}"' for c in cols)
+        db.executescript(f"INSERT INTO clips ({quoted}) SELECT {quoted} FROM clips_old; DROP TABLE clips_old;")
     db.executescript(SCHEMA)
     have = {r["name"] for r in db.execute("PRAGMA table_info(clips)")}
     for name, kind in EXTRA_COLUMNS.items():
@@ -139,12 +153,34 @@ def _rank_of(path: Path) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _clip_fields(d: dict, used: dict, video: str) -> dict:
+    """The queue columns that come from candidates.json + the render's sidecar file."""
+    ai = d.get("ai") or {}
+    reasons = list(d.get("warning_reasons", [])) + list(used.get("warnings", []))
+    return {"peak_time": d.get("peak_time"), "video": video, "warning": int(bool(reasons)),
+            "warning_reasons": json.dumps(reasons), "ai_score": ai.get("score"), "ai_reason": ai.get("reason", ""),
+            "hook": used.get("hook", ai.get("hook", "")), "title": ai.get("title", ""),
+            "transcript": d.get("transcript", ""), "final_score": d.get("final_score", d.get("peak_score")),
+            "start": used.get("start", d["start"]), "end": used.get("end", d["end"]),
+            "layout": used.get("layout", d.get("layout", "split")), "category": ai.get("category", ""),
+            "hashtags": json.dumps(ai.get("hashtags", [])), "context_line": used.get("banner", ai.get("context_line", "")),
+            "campaign": used.get("campaign") or "", "explore": int(bool(d.get("explore"))),
+            "peak_score": d.get("peak_score"), "ai_json": json.dumps(ai),
+            "breakdown_json": json.dumps(d.get("breakdown", {})),
+            "layout_reason": used.get("layout_reason", d.get("layout_reason", ""))}
+
+
 def import_clips(db: sqlite3.Connection, out_root: Path = OUT_ROOT) -> int:
     """Add every finished clip under out_root to the database. Returns how many were new.
 
-    Existing clips are never reset: your approvals, rejections and edits survive re-imports.
-    The only update is the video path, if the file the database points at has disappeared
-    (e.g. you deleted it and rendered it again with `clipper.edit render`).
+    A clip is identified by its FILE and its MOMENT (peak time), not by its rank number,
+    because re-processing a VOD reshuffles the ranks. For each finished .mp4:
+      1. a row already shows this file                              -> nothing to do
+      2. a row has the same moment but its file is gone (re-render) -> follow it to the new file
+      3. a row has the same rank, a different moment, and you never
+         touched it (still pending, no decisions or edits)          -> reuse that row for the new moment
+      4. otherwise                                                  -> a NEW row
+    Your approvals, rejections and edits are never moved to a different moment.
     """
     added = 0
     now = time.time()
@@ -155,6 +191,7 @@ def import_clips(db: sqlite3.Connection, out_root: Path = OUT_ROOT) -> int:
             continue
         data = json.loads(cand_path.read_text(encoding="utf-8"))
         by_rank = {d["rank"]: d for d in data["candidates"]}
+        key = (data["streamer"], data["vod_id"])
         for mp4 in sorted(final_dir.glob("*.mp4")):
             rank = _rank_of(mp4)
             d = by_rank.get(rank)
@@ -164,54 +201,32 @@ def import_clips(db: sqlite3.Connection, out_root: Path = OUT_ROOT) -> int:
             # don't have this file, so fall back to the candidate's own values.
             sidecar = final_dir / "work" / f"{mp4.stem}.json"
             used = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
-            ai = d.get("ai") or {}
             video = mp4.relative_to(out_root).as_posix()
-            reasons = list(d.get("warning_reasons", [])) + list(used.get("warnings", []))
+            fields = _clip_fields(d, used, video)
             with db:
-                cur = db.execute(
-                    """INSERT OR IGNORE INTO clips (streamer, vod_id, rank, peak_time, video, warning,
-                         warning_reasons, ai_score, ai_reason, hook, title, transcript, final_score,
-                         start, "end", layout, created_at, updated_at, category, hashtags, context_line,
-                         campaign, explore, peak_score, ai_json, breakdown_json, layout_reason)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (data["streamer"], data["vod_id"], rank, d.get("peak_time"), video,
-                     int(bool(reasons)), json.dumps(reasons),
-                     ai.get("score"), ai.get("reason", ""), used.get("hook", ai.get("hook", "")),
-                     ai.get("title", ""), d.get("transcript", ""), d.get("final_score", d.get("peak_score")),
-                     used.get("start", d["start"]), used.get("end", d["end"]),
-                     used.get("layout", d.get("layout", "split")), now, now, ai.get("category", ""),
-                     json.dumps(ai.get("hashtags", [])), used.get("banner", ai.get("context_line", "")),
-                     used.get("campaign") or "", int(bool(d.get("explore"))), d.get("peak_score"),
-                     json.dumps(ai), json.dumps(d.get("breakdown", {})),
-                     used.get("layout_reason", d.get("layout_reason", ""))))
-                if cur.rowcount:
-                    added += 1
-                else:
-                    row = db.execute("SELECT id, video, status, peak_time FROM clips "
-                                     "WHERE streamer=? AND vod_id=? AND rank=?",
-                                     (data["streamer"], data["vod_id"], rank)).fetchone()
-                    same_moment = row["peak_time"] == d.get("peak_time")
-                    touched = db.execute("SELECT COUNT(*) FROM events WHERE clip_id=?", (row["id"],)).fetchone()[0]
-                    if not (out_root / row["video"]).exists() and row["status"] == "pending" and not touched:
-                        # The VOD was processed again and you never touched this clip: show the new one.
-                        db.execute(
-                            """UPDATE clips SET video=?, peak_time=?, warning=?, warning_reasons=?, ai_score=?,
-                               ai_reason=?, hook=?, title=?, transcript=?, final_score=?, start=?, "end"=?, layout=?,
-                               category=?, hashtags=?, context_line=?, explore=?, peak_score=?, ai_json=?,
-                               breakdown_json=?, layout_reason=?, version=0, render_error='', updated_at=? WHERE id=?""",
-                            (video, d.get("peak_time"), int(bool(reasons)), json.dumps(reasons), ai.get("score"),
-                             ai.get("reason", ""), used.get("hook", ai.get("hook", "")), ai.get("title", ""),
-                             d.get("transcript", ""), d.get("final_score", d.get("peak_score")),
-                             used.get("start", d["start"]), used.get("end", d["end"]), used.get("layout", d.get("layout", "split")),
-                             ai.get("category", ""), json.dumps(ai.get("hashtags", [])),
-                             used.get("banner", ai.get("context_line", "")), int(bool(d.get("explore"))),
-                             d.get("peak_score"), json.dumps(ai), json.dumps(d.get("breakdown", {})),
-                             used.get("layout_reason", d.get("layout_reason", "")), now, row["id"]))
-                    elif not (out_root / row["video"]).exists() and same_moment:
-                        # Only follow a clip to a new file when it's the SAME moment: re-processing a
-                        # VOD can give rank 3 to a different moment, and an approval must never jump
-                        # to a clip you didn't watch.
-                        db.execute("UPDATE clips SET video=?, updated_at=? WHERE id=?", (video, now, row["id"]))
+                if db.execute("SELECT 1 FROM clips WHERE video=?", (video,)).fetchone():
+                    continue                                                          # 1.
+                same = db.execute("SELECT id, video FROM clips WHERE streamer=? AND vod_id=? AND rank=? "
+                                  "AND peak_time=?", (*key, rank, d.get("peak_time"))).fetchall()
+                gone = [r for r in same if not (out_root / r["video"]).exists()]
+                if gone:                                                              # 2.
+                    db.execute("UPDATE clips SET video=?, updated_at=? WHERE id=?", (video, now, gone[0]["id"]))
+                    continue
+                if same:
+                    continue   # this moment is already in the queue with a working file
+                reusable = [r for r in db.execute(
+                    "SELECT id, video FROM clips WHERE streamer=? AND vod_id=? AND rank=? AND status='pending' "
+                    "AND version=0 AND id NOT IN (SELECT clip_id FROM events)", (*key, rank)).fetchall()
+                    if not (out_root / r["video"]).exists()]
+                if reusable:                                                          # 3.
+                    sets = ", ".join(f'"{k}"=?' for k in fields)
+                    db.execute(f"UPDATE clips SET {sets}, render_error='', updated_at=? WHERE id=?",
+                               (*fields.values(), now, reusable[0]["id"]))
+                    continue
+                cols = ["streamer", "vod_id", "rank", *fields, "created_at", "updated_at"]  # 4.
+                db.execute(f"INSERT INTO clips ({', '.join(chr(34) + c + chr(34) for c in cols)}) "
+                           f"VALUES ({', '.join('?' * len(cols))})", (*key, rank, *fields.values(), now, now))
+                added += 1
     return added
 
 

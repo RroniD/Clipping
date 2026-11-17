@@ -200,3 +200,52 @@ def test_approved_clip_never_jumps_to_a_different_moment(tmp_path):
     row = db.execute("SELECT video, status, peak_time FROM clips WHERE rank=1").fetchone()
     assert row["status"] == "approved" and row["peak_time"] == "0h01m00s"
     assert row["video"].endswith("01_0h01m00s.mp4")       # still points at what you approved
+
+
+def test_rerun_adds_new_moments_and_never_moves_an_approval(tmp_path):
+    """Re-processing a VOD gives rank 1 to a NEW moment: it becomes a new queue entry, and the
+    approved old moment keeps its row, its file and its status."""
+    out_root = tmp_path / "out"
+    vod = make_vod(out_root)
+    db = queue_app.connect(tmp_path / "q.db")
+    queue_app.import_clips(db, out_root)
+    db.execute("UPDATE clips SET status='approved' WHERE rank=1")
+    db.commit()
+    old_video = db.execute("SELECT video FROM clips WHERE rank=1").fetchone()["video"]
+    # Keep the approved file where it is (moved aside, like final_v1_...), add a new moment as rank 1.
+    (vod / "final_v1").mkdir()
+    (vod / "final" / "01_0h01m00s.mp4").rename(vod / "final_v1" / "01_0h01m00s.mp4")
+    db.execute("UPDATE clips SET video=? WHERE rank=1", (old_video.replace("/final/", "/final_v1/"),))
+    db.commit()
+    data = json.loads((vod / "candidates.json").read_text())
+    data["candidates"][0]["peak_time"] = "1h00m00s"
+    (vod / "candidates.json").write_text(json.dumps(data))
+    (vod / "final" / "01_1h00m00s.mp4").write_bytes(b"\x00" * 100)
+    assert queue_app.import_clips(db, out_root) == 1
+    rows = db.execute("SELECT status, peak_time, video FROM clips WHERE rank=1 ORDER BY id").fetchall()
+    assert [(r["status"], r["peak_time"]) for r in rows] == [("approved", "0h01m00s"), ("pending", "1h00m00s")]
+    assert rows[0]["video"].endswith("final_v1/01_0h01m00s.mp4")
+    assert queue_app.import_clips(db, out_root) == 0          # running it again adds nothing
+
+
+def test_old_unique_rank_rule_is_migrated(tmp_path):
+    import sqlite3
+    old = sqlite3.connect(tmp_path / "q.db")
+    old.executescript("""CREATE TABLE clips (id INTEGER PRIMARY KEY, streamer TEXT NOT NULL, vod_id TEXT NOT NULL,
+        rank INTEGER NOT NULL, peak_time TEXT, video TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+        warning INTEGER NOT NULL DEFAULT 0, warning_reasons TEXT NOT NULL DEFAULT '[]', ai_score REAL,
+        ai_reason TEXT NOT NULL DEFAULT '', hook TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '',
+        transcript TEXT NOT NULL DEFAULT '', final_score REAL, start REAL NOT NULL, "end" REAL NOT NULL,
+        layout TEXT NOT NULL DEFAULT 'split', rendering INTEGER NOT NULL DEFAULT 0,
+        render_error TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL,
+        updated_at REAL NOT NULL, decided_at REAL, UNIQUE (streamer, vod_id, rank));
+        INSERT INTO clips (id, streamer, vod_id, rank, video, start, "end", created_at, updated_at, status)
+        VALUES (7, 's', 'v', 1, 'x.mp4', 0, 30, 0, 0, 'approved');""")
+    old.commit()
+    old.close()
+    db = queue_app.connect(tmp_path / "q.db")
+    assert "UNIQUE" not in db.execute("SELECT sql FROM sqlite_master WHERE name='clips'").fetchone()[0]
+    row = db.execute("SELECT id, status FROM clips").fetchone()
+    assert (row["id"], row["status"]) == (7, "approved")      # same id, decision kept
+    db.execute("INSERT INTO clips (streamer, vod_id, rank, video, start, \"end\", created_at, updated_at) "
+               "VALUES ('s', 'v', 1, 'y.mp4', 0, 30, 0, 0)")    # a second clip with rank 1 is now allowed
