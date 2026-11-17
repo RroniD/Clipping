@@ -152,6 +152,10 @@ def main() -> None:
         d["start_time"] = hms(c.start)
         if platform == "twitch":
             d["vod_link"] = f"https://www.twitch.tv/videos/{vod_id}?t={hms(max(0, c.start))}"
+        if id(c) in words_by_candidate:
+            # Word timings (VOD seconds) so Stage 2 can make captions without running Whisper again.
+            d["words"] = [[round(w.start, 2), round(w.end, 2), w.text]
+                          for w in words_by_candidate[id(c)] if w.end > c.start and w.start < c.end]
         results.append(d)
 
     print("7/8 AI judge: rating clips, writing hooks, checking for spoilers")

@@ -81,3 +81,30 @@ neutral_score = 5             # AI score used for clips that couldn't be judged
 [download]
 padding = 2                # extra seconds on both sides of each preview
 preview_format = "bv*[height<=720]+ba/b[height<=720]/b"
+
+[edit]
+# Stage 2: finished vertical 9:16 clips (python -m clipper.edit render out\<streamer>\<vod_id>)
+top_n = 10                 # how many of the best (non-warning) candidates to edit
+source_format = "bv*[height<=1080]+ba/b[height<=1080]/b"   # only the clip section is downloaded
+fps = 30
+preset = "veryfast"        # x264 speed/size trade-off
+crf = 20                   # x264 quality: lower = better and bigger (18-23 is sensible)
+facecam_share = 0.35       # "split" layout: facecam takes the top 35% of the screen
+blur_strength = 10         # "no_facecam" layout: blur of the background fill
+font = "Arial Black"       # any font installed on Windows, by name
+caption_size = 84
+caption_max_words = 3      # 2-4 words on screen at a time
+caption_max_chars = 16
+caption_gap = 0.6          # a pause this long (s) starts a new caption
+caption_uppercase = true
+caption_y_no_facecam = 0.70   # caption height as a share of the screen (0 = top)
+caption_y_crop = 0.62
+hook = true                # show the AI judge's hook text at the start (needs ANTHROPIC_API_KEY)
+hook_size = 64
+hook_seconds = 2.2
+hook_y = 0.17
+credit = true              # small "twitch.tv/<name>" line; campaigns usually require it
+credit_size = 34
+ui_bottom_share = 0.20     # TikTok/Shorts/Reels buttons cover the bottom 20%: keep text above it
+loudness_lufs = -14        # what the platforms normalise to
+duck_music_db = 0          # >0 lowers volume by this many dB when nobody talks (does NOT remove music)
