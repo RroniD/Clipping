@@ -61,10 +61,12 @@ threshold = 2.0            # a bit lower than before: the AI judge filters, so w
 min_gap_seconds = 45
 
 [clip]
-min_seconds = 15
-max_seconds = 50           # some campaigns allow 60; short clips get watched to the end more often
-target_seconds = 30
-pre_roll = 8               # start this many seconds before the peak (the AI then tightens it)
+min_seconds = 25
+max_seconds = 45           # normal upper length...
+max_seconds_setup = 60     # ...but a clip whose build-up needs it may run this long: setup beats shortness
+reaction_keep = 4          # when shortening, always keep this many seconds after the peak (the reaction)
+target_seconds = 35
+pre_roll = 12              # start this many seconds before the peak (more if the build-up is long)
 build_up_max = 20          # may extend back this much more while score stays high
 post_roll = 3              # extra seconds after the score falls off
 tail_max = 45              # end at most this many seconds after the peak (before post_roll)
@@ -113,8 +115,11 @@ max_tokens = 4000             # thinking counts toward this, keep it at 4000 or 
 chat_sample = 30              # how many chat messages from the moment the model sees
 frames = 15                   # still frames per moment (about 1 every 2 s, max this many)
 frame_width = 512             # small frames are cheap and still show what happens
-window_before = 8             # the AI may start up to this much earlier than the detector's cut...
-window_after = 6              # ...and end this much later
+window_before = 20            # the AI sees (and may start) up to 20 s before the detector's cut,
+                              # so it can find the play that led to the moment...
+window_after = 6              # ...and end up to 6 s later
+max_start_delay = 3           # the AI may start at most 3 s LATER than the detector (skip dead time,
+                              # never the setup); earlier is always allowed
 fallbacks = true              # bigger models only: retry on a fallback model if one declines
 warn_on = ["high"]            # spoiler_risk levels that get the warning flag ("low" too in launch_mode)
 cutscene_quiet_seconds = 12   # flag clips with this many seconds of no speech + quiet chat
@@ -155,7 +160,8 @@ banner = true              # after the hook, a smaller line of context stays at 
 banner_size = 44
 credit = true              # small "twitch.tv/<name>" line; campaigns usually require it
 credit_size = 34
-dead_air = true            # cut pauses where nobody talks AND the game is quiet
+dead_air = true            # trim quiet stretches at the very start / end of a clip (nobody talks AND the game is quiet)
+dead_air_inside = false    # true = also cut quiet pauses INSIDE the clip (can cut build-up: off by default)
 dead_air_gap = 0.7         # only pauses longer than this...
 dead_air_keep = 0.15       # ...and keep this much air around the words
 dead_air_quiet_db = 4      # "quiet" = at least this many dB below the clip's typical loudness

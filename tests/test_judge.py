@@ -18,7 +18,7 @@ from clipper.transcribe import Word
 CFG = load_config(None)
 GOOD = {"category": "funny", "standalone": 8, "hook_strength": 7, "payoff": 9, "score": 8,
         "visual_payoff": 7, "facecam_reaction": "big", "is_cutscene": False, "menu_or_map": False,
-        "cut_start": 5.0, "cut_end": 30.0, "hook": "He did NOT see that coming",
+        "setup_start": 5.0, "cut_start": 5.0, "cut_end": 30.0, "hook": "He did NOT see that coming",
         "context_line": "Speed trusts his crew with the money", "title": "Speed trusted his crew... mistake",
         "hashtags": ["#ishowspeed", "gta", "funny"], "spoiler_risk": "none", "reason": "Funny crash."}
 
@@ -139,14 +139,35 @@ def test_frame_times_every_two_seconds_with_peak():
 
 def test_apply_cut_snaps_to_words_and_keeps_the_peak():
     words = [Word(104.8, 105.6, "so"), Word(129.7, 130.4, "dead")]
-    ai = {"cut_start": 5.0, "cut_end": 30.0}           # window starts at 100
+    ai = {"setup_start": 5.0, "cut_start": 5.0, "cut_end": 30.0}           # window starts at 100
     assert apply_cut(100, ai, words, 112, CFG["clip"], 1000) == (104.8, 130.65)
     # A cut that starts after the peak is pulled back to peak - peak_guard.
-    start, end = apply_cut(100, {"cut_start": 15.0, "cut_end": 40.0}, [], 112, CFG["clip"], 1000)
+    start, end = apply_cut(100, {"setup_start": 15.0, "cut_start": 15.0, "cut_end": 40.0}, [], 112,
+                           CFG["clip"], 1000)
     assert start == 109 and end == 140
-    # Too long -> trimmed to max_seconds.
-    start, end = apply_cut(0, {"cut_start": 0.0, "cut_end": 90.0}, [], 10, CFG["clip"], 1000)
-    assert end - start == CFG["clip"]["max_seconds"]
+    # Too long, payoff early -> the END is shortened to max_seconds; the start stays.
+    start, end = apply_cut(0, {"setup_start": 0.0, "cut_start": 0.0, "cut_end": 90.0}, [], 10, CFG["clip"], 1000)
+    assert start == 0 and end == CFG["clip"]["max_seconds"]
+
+
+def test_build_up_is_kept_when_the_payoff_comes_15_s_after_the_action():
+    """Regression test (Speed's first win): the play starts at 100 s, the win (peak) is at 115 s.
+    The AI's cut must not start on the win screen."""
+    clip = CFG["clip"]
+    words = [Word(100.2, 100.8, "go"), Word(101.0, 101.6, "push"), Word(115.5, 116.0, "WE"), Word(116.0, 116.6, "WON")]
+    # 1. The AI says the setup starts at 100 but (wrongly) wants to cut at the win: setup wins.
+    ai = {"setup_start": 10.0, "cut_start": 23.0, "cut_end": 40.0}       # window starts at 90
+    start, end = apply_cut(90, ai, words, 115, clip, 1000, detector_start=101, max_start_delay=3)
+    assert start <= 100.2 and end >= 115 + 1.5
+    # 2. The AI misses the setup entirely (setup_start = cut_start = the win): the start may be at
+    #    most max_start_delay later than the detector's start, so the play stays in.
+    ai = {"setup_start": 24.0, "cut_start": 24.0, "cut_end": 40.0}
+    start, _ = apply_cut(90, ai, words, 115, clip, 1000, detector_start=100, max_start_delay=3)
+    assert start <= 103 and 115 - start >= 12
+    # 3. Moving EARLIER is always allowed.
+    ai = {"setup_start": 2.0, "cut_start": 2.0, "cut_end": 40.0}
+    start, _ = apply_cut(90, ai, words, 115, clip, 1000, detector_start=101, max_start_delay=3)
+    assert start == 92
 
 
 def test_quality_uses_subscores_reaction_and_rank():

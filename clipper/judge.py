@@ -57,6 +57,8 @@ JUDGE_SCHEMA = {
         "hook_strength": {"type": "integer", "description": "1-10: how hard the first 2 s of YOUR cut grab"},
         "payoff": {"type": "integer", "description": "1-10: how strong the punchline / reaction / result is"},
         "score": {"type": "integer", "description": "1-10 overall chance to go viral"},
+        "setup_start": {"type": "number", "description": "seconds from the window start: when the action "
+                                                          "that leads to the payoff begins"},
         "cut_start": {"type": "number", "description": "seconds from the window start"},
         "cut_end": {"type": "number", "description": "seconds from the window start"},
         "visual_payoff": {"type": "integer", "description": "1-10: how much the frames show it (vs. only talk)"},
@@ -70,7 +72,7 @@ JUDGE_SCHEMA = {
         "spoiler_risk": {"type": "string", "enum": list(SPOILER_LEVELS)},
         "reason": {"type": "string"},
     },
-    "required": ["category", "standalone", "hook_strength", "payoff", "score", "cut_start", "cut_end",
+    "required": ["category", "standalone", "hook_strength", "payoff", "score", "setup_start", "cut_start", "cut_end",
                  "visual_payoff", "facecam_reaction", "is_cutscene", "menu_or_map", "hook", "context_line",
                  "title", "hashtags", "spoiler_risk", "reason"],
     "additionalProperties": False,
@@ -83,11 +85,17 @@ time WINDOW around it: the streamer's transcript with timestamps, chat with time
 clips viewers made, still frames, and the signal strengths. Times are seconds from the window start.
 
 How these platforms decide: viewers decide in the first 1-3 seconds whether to swipe away, and \
-reach depends on how much of the clip people watch and rewatch. So:
-- START ON THE ACTION. Begin 1-3 s before the key moment, or at the first line of setup that the \
-payoff truly needs. Never start with dead air, greetings, or context nobody needs.
-- END RIGHT AFTER THE PAYOFF (the punchline, the reaction, the result), at most ~2 s later. No outro.
-- Best length is 18-40 s. Shorter is fine if it's complete; never pad.
+reach depends on how much of the clip people watch and rewatch. But a clip that shows only a \
+reaction, without what caused it, gets swiped too. So:
+- A STRANGER MUST SEE WHAT HAPPENED, NOT JUST THE REACTION TO IT. Find the payoff (the win, the \
+crash, the punchline, the reaction), then find setup_start: the moment the action that LEADS to it \
+begins - the final fight, the last kill, the chase, the question that gets the funny answer, the \
+line that sets up the joke. Look at the frames and the transcript before the peak to find it.
+- START AT OR BEFORE setup_start (1-2 s before it is ideal). Starting on the result screen or the \
+celebration is WRONG: "he won" means nothing without seeing how. Only skip true dead time (silence, \
+menus, waiting) that comes before the setup.
+- END RIGHT AFTER THE PAYOFF and its reaction, at most ~2 s later. No outro.
+- Length 25-45 s is typical; if the setup needs it, up to 60 s. Setup beats shortness.
 - Cut on sentence edges: don't start or end in the middle of the streamer's sentence.
 - The STRANGER TEST: would someone who never saw this stream understand it and care?
 
@@ -98,7 +106,8 @@ off-screen things score low).
 - payoff: how strong the punchline / reaction / result is.
 - score: overall chance this clip goes viral.
 
-cut_start / cut_end: your chosen cut, in seconds from the window start, inside the window.
+setup_start / cut_start / cut_end: in seconds from the window start, inside the window. \
+cut_start must be at or before setup_start.
 
 From the frames:
 - visual_payoff (1-10): how much you can SEE it happen (a crash, a kill, a face), vs. only hear it.
@@ -199,11 +208,13 @@ def validate(data: dict, window_len: float | None = None) -> dict:
         raise JudgeOutputError(f"hook must be 1-8 words, got {hook!r}")
     try:
         cut_start, cut_end = float(data["cut_start"]), float(data["cut_end"])
+        setup_start = float(data["setup_start"])
     except (TypeError, ValueError):
         raise JudgeOutputError(f"bad cut: {data['cut_start']!r}-{data['cut_end']!r}") from None
     if window_len is not None:
         cut_start = min(max(0.0, cut_start), window_len)
         cut_end = min(max(0.0, cut_end), window_len)
+        setup_start = min(max(0.0, setup_start), window_len)
     if cut_end - cut_start < 3:
         raise JudgeOutputError(f"cut too short or backwards: {cut_start}-{cut_end}")
     tags = data["hashtags"] if isinstance(data["hashtags"], list) else []
@@ -212,7 +223,7 @@ def validate(data: dict, window_len: float | None = None) -> dict:
             "context_line": context, "facecam_reaction": reaction,
             "is_cutscene": bool(data["is_cutscene"]), "menu_or_map": bool(data["menu_or_map"]),
             "hashtags": tags, "spoiler_risk": data["spoiler_risk"], "reason": str(data["reason"]).strip(),
-            "cut_start": round(cut_start, 2), "cut_end": round(cut_end, 2)}
+            "cut_start": round(cut_start, 2), "cut_end": round(cut_end, 2), "setup_start": round(setup_start, 2)}
 
 
 # --------------------------------------------------------------------------- what the model sees
@@ -333,7 +344,9 @@ class Judge:
         if client is None:
             import anthropic  # only needed when judging is on
             # Reads ANTHROPIC_API_KEY from the environment (.env is loaded by run.py / live.py).
-            client = anthropic.Anthropic()
+            # max_retries=5: home internet blips happen (one real run lost every request to a
+            # "connection error"); the SDK waits a little longer before each retry.
+            client = anthropic.Anthropic(max_retries=5)
         self.client = client
         self.tokens_in = self.tokens_out = 0
 
@@ -409,17 +422,24 @@ class Judge:
 # --------------------------------------------------------------------------- applying the cut
 
 def apply_cut(window_start: float, ai: dict, words, peak: float, clip_cfg: dict,
-              vod_length: float) -> tuple[float, float]:
-    """The AI's cut in VOD seconds, nudged onto word edges and into the allowed length.
+              vod_length: float, detector_start: float | None = None,
+              max_start_delay: float = 3.0) -> tuple[float, float]:
+    """The AI's cut in VOD seconds, with the BUILD-UP PROTECTED, on word edges, in the allowed length.
 
-    - A start inside a word moves to that word's start; an end inside a word moves to its end
-      (+0.25 s so the last word isn't clipped).
-    - Then the length is forced into [min_seconds, max_seconds] (trimming the end first, since
-      the AI is told to start on the action).
+    Lesson from a real clip (Speed's first win): "start on the action" made the cut start on the
+    win screen, without the play that won it. So:
+    - The start is never later than the AI's own setup_start (where the action leading to the
+      payoff begins). The AI may move the start EARLIER freely, but LATER than the detector's
+      start by at most `max_start_delay` s (enough to skip a little dead time, not the setup).
+    - The moment itself is always in: start <= peak - peak_guard, end >= peak + 1.5.
+    - A start inside a word moves to that word's start; an end inside a word to its end (+0.25 s).
+    - Too long: the END is shortened first (never before the payoff's reaction), because setup
+      beats shortness. Only beyond `max_seconds_setup` is the start moved.
     """
-    start = window_start + ai["cut_start"]
+    start = window_start + min(ai["cut_start"], ai.get("setup_start", ai["cut_start"]))
     end = window_start + ai["cut_end"]
-    # The moment itself must be in the clip, with a little lead-in and the reaction after it.
+    if detector_start is not None:
+        start = min(start, detector_start + max_start_delay)
     start = min(start, peak - clip_cfg["peak_guard"])
     end = max(end, peak + 1.5)
     for w in words or []:
@@ -427,19 +447,31 @@ def apply_cut(window_start: float, ai: dict, words, peak: float, clip_cfg: dict,
             start = w.start
         if w.start < end < w.end + 0.25:
             end = w.end + 0.25
+    start, end = fit_length(start, end, peak, clip_cfg, words)
+    return round(max(0.0, start), 2), round(min(vod_length, end), 2)
+
+
+def fit_length(start: float, end: float, peak: float, clip_cfg: dict, words=None) -> tuple[float, float]:
+    """Force a cut into the allowed length WITHOUT cutting the setup.
+
+    Too long: shorten the end, but keep the payoff and ~4 s of reaction after the peak; the clip may
+    then run up to max_seconds_setup (60 s) because the setup is worth it. Only if it's still longer
+    does the start move. Too short: grow mostly at the end (60%), a little before (40%).
+    """
     lo, hi = clip_cfg["min_seconds"], clip_cfg["max_seconds"]
+    hard = clip_cfg["max_seconds_setup"]
     if end - start > hi:
-        end = start + hi
+        end = max(start + hi, min(end, peak + clip_cfg["reaction_keep"]))
         inside = [w for w in words or [] if start < w.end <= end]
         if inside and end - inside[-1].end < 3:       # finish on a word, not mid-word
             end = inside[-1].end + 0.25
+        if end - start > hard:
+            start = end - hard
     if end - start < lo:
         missing = lo - (end - start)
-        end += 0.6 * missing                          # mostly after: the AI's start is deliberate
+        end += 0.6 * missing
         start -= 0.4 * missing
-    start = max(0.0, start)
-    end = min(vod_length, end)
-    return round(start, 2), round(end, 2)
+    return start, end
 
 
 # --------------------------------------------------------------------------- local cutscene check
@@ -559,7 +591,10 @@ def judge_all(results: list[dict], words_per_candidate: list, messages: list, ch
                                     chat_sample(messages, ws, we, judge.cfg.chat_sample), clips, frames)
             try:
                 d["ai"] = judge.judge(content, we - ws)
-                d["start"], d["end"] = apply_cut(ws, d["ai"], words, d["peak"], cfg["clip"], vod_length)
+                d["pre_judge_start"] = d["start"]
+                d["start"], d["end"] = apply_cut(ws, d["ai"], words, d["peak"], cfg["clip"], vod_length,
+                                                 detector_start=d["start"],
+                                                 max_start_delay=float(j["max_start_delay"]))
                 d["duration"] = round(d["end"] - d["start"], 2)
                 log(f"    [{i}/{len(to_judge)}] {d['peak_time']}: {d['ai']['score']}/10 {d['ai']['category']}, "
                     f"{d['duration']:.0f} s, spoiler {d['ai']['spoiler_risk']}: {d['ai']['hook']}")

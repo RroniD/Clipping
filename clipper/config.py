@@ -103,10 +103,12 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                    'spam': 0.6},
     'scoring': {'z_cap': 8, 'both_bonus': 0.5, 'smooth_seconds': 3},
     'peaks': {'threshold': 2.0, 'min_gap_seconds': 45},
-    'clip': {   'min_seconds': 15,
-                'max_seconds': 50,
-                'target_seconds': 30,
-                'pre_roll': 8,
+    'clip': {   'min_seconds': 25,
+                'max_seconds': 45,
+                'max_seconds_setup': 60,
+                'reaction_keep': 4,
+                'target_seconds': 35,
+                'pre_roll': 12,
                 'build_up_max': 20,
                 'post_roll': 3,
                 'tail_max': 45,
@@ -142,8 +144,9 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                  'chat_sample': 30,
                  'frames': 15,
                  'frame_width': 512,
-                 'window_before': 8,
+                 'window_before': 20,
                  'window_after': 6,
+                 'max_start_delay': 3,
                  'fallbacks': True,
                  'warn_on': ['high'],
                  'cutscene_quiet_seconds': 12,
@@ -179,6 +182,7 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                 'credit': True,
                 'credit_size': 34,
                 'dead_air': True,
+                'dead_air_inside': False,
                 'dead_air_gap': 0.7,
                 'dead_air_keep': 0.15,
                 'dead_air_quiet_db': 4,
@@ -212,6 +216,7 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                 'x264_threads': 4,
                 'whisper_model': '',
                 'min_quality': 4.5}}
+
 
 
 def _merge(base: dict, override: dict) -> dict:

@@ -135,16 +135,19 @@ def clamp_length(start: float, end: float, peak: float, clip_cfg: dict,
                  vod_length: float) -> tuple[float, float]:
     """Force the clip to be between min_seconds and max_seconds long.
 
-    Too long: rebuild it around the peak at target_seconds, ~45% before the peak
-      (the build-up) and ~55% after (the reaction).
+    Too long: keep the start (the build-up) and shorten the end, never past the payoff's
+      reaction; up to max_seconds_setup (60 s) is allowed when the setup needs it.
     Too short: grow it, 60% of the missing time added before and 40% after.
     """
     lo, hi = clip_cfg["min_seconds"], clip_cfg["max_seconds"]
     length = end - start
     if length > hi:
-        target = clip_cfg["target_seconds"]
-        start = peak - clip_cfg["keep_before_ratio"] * target
-        end = start + target
+        # Setup beats shortness: keep the start (the build-up) and shorten the END, keeping the
+        # payoff and ~4 s of reaction. Only past max_seconds_setup does the start move.
+        # (It used to re-centre the clip on the peak, which cut the play that led to it.)
+        end = max(start + hi, min(end, peak + clip_cfg["reaction_keep"]))
+        if end - start > clip_cfg["max_seconds_setup"]:
+            start = end - clip_cfg["max_seconds_setup"]
     elif length < lo:
         missing = lo - length
         start -= 0.6 * missing

@@ -374,6 +374,9 @@ def plan_segments(words: list[dict], duration: float, peak: float, levels: np.nd
 
     Dead air = a pause in speech longer than `dead_air_gap` where the game is also quiet
     (a few dB below the clip's typical level). Those get cut down to a short breath.
+    By default only at the EDGES (before the first word, after the last): a real Speed clip lost
+    the play that led to his win when pauses inside the clip were cut. `dead_air_inside = true`
+    also cuts inside pauses. When in doubt, nothing is cut.
     Why "game also quiet"? A silent streamer during a car chase is not dead air: the action
     is the point. And we never cut within 3 s before / 4 s after the peak (the moment itself).
     Faster pacing keeps people watching (retention is what the platforms reward).
@@ -386,8 +389,13 @@ def plan_segments(words: list[dict], duration: float, peak: float, levels: np.nd
     cuts = []
     edges = [(-1.0, 0.0)] + [(w["start"], w["end"]) for w in sorted(words, key=lambda w: w["start"])] \
         + [(duration, duration + 1)]
-    for (_, prev_end), (next_start, _) in zip(edges, edges[1:]):
-        a, b = max(0.0, prev_end + keep_air), min(duration, next_start - keep_air)
+    last = len(edges) - 2
+    for i, ((_, prev_end), (next_start, _)) in enumerate(zip(edges, edges[1:])):
+        if not e["dead_air_inside"] and 0 < i < last:
+            continue   # only the quiet bit before the first word and after the last one
+        # At the clip's own start/end there's nothing to keep air around: trim to the very edge.
+        a = 0.0 if i == 0 else prev_end + keep_air
+        b = duration if i == last else min(duration, next_start - keep_air)
         if b - a < e["dead_air_gap"] - 2 * keep_air:
             continue
         if a < peak + 4 and b > peak - 3:

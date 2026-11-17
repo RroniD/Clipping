@@ -73,6 +73,9 @@ def test_dead_air_is_cut_only_when_quiet_and_away_from_the_peak():
     levels = np.full(170, -20.0)          # 0.1-s levels, typical -20 dB
     levels[22:58] = -40.0                 # 2.2-5.8 s: quiet  -> dead air, cut
     levels[82:148] = -20.0                # 8.2-14.8 s: loud (game action) -> kept
+    # Default: pauses INSIDE the clip are never cut (they can be the build-up).
+    assert edit.plan_segments(w, 17.0, peak=16.0, levels=levels, cfg=cfg) == [(0.0, 17.0)]
+    cfg["edit"]["dead_air_inside"] = True
     segs = edit.plan_segments(w, 17.0, peak=16.0, levels=levels, cfg=cfg)
     assert segs == [(0.0, 2.15), (5.85, 17.0)]
     # Near the peak nothing is cut, even if quiet.
@@ -192,3 +195,15 @@ def test_render_with_cuts_zoom_and_safe_overlay(tmp_path):
     assert (video["width"], video["height"]) == (1080, 1920)
     assert abs(float(info["format"]["duration"]) - 3.0) < 0.3
     assert edit.save_cover(out, 1.2, tmp_path / "cover.jpg").exists()
+
+
+def test_dead_air_trimmed_only_at_the_edges_by_default():
+    cfg = load_config()
+    w = words((3.0, 4.0, "so"), (10.0, 11.0, "go"), (33.0, 34.0, "WON"))
+    levels = np.full(400, -20.0)              # 40 s, typical level -20 dB
+    levels[0:28] = -45.0                      # quiet before the first word
+    levels[42:98] = -45.0                     # quiet pause inside (part of the build-up): must stay
+    segs = edit.plan_segments(w, 40.0, peak=34.0, levels=levels, cfg=cfg)
+    assert len(segs) == 1                     # nothing cut inside
+    assert 2.5 < segs[0][0] < 3.0             # leading silence trimmed to a short breath
+    assert segs[0][1] == 40.0

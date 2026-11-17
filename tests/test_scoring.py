@@ -45,8 +45,7 @@ def test_rough_bounds_follow_decay():
     score[90:131] = 5          # build-up and reaction around the peak
     score[120] = 10
     start, end = rough_bounds(score, 120, CLIP)
-    # pre_roll is 8 s (112), extended back while score > 35% of peak, at most build_up_max (20 s) more
-    assert start == 92
+    assert start == 90         # extended back past pre_roll while score > 35% of peak
     assert end == 130 + CLIP["post_roll"]
 
 
@@ -75,16 +74,22 @@ def test_snap_never_starts_after_peak_guard():
     assert start == 110 - CLIP["peak_guard"]
 
 
-def test_clamp_too_long_keeps_peak():
+def test_clamp_too_long_keeps_the_build_up():
+    """Shortening a long clip cuts the END (after the reaction), never the setup at the start."""
+    start, end = clamp_length(0, 100, peak=20, clip_cfg=CLIP, vod_length=1000)
+    assert start == 0 and end == CLIP["max_seconds"]
+    # Payoff late in the clip: it may run up to max_seconds_setup to keep both setup and payoff.
     start, end = clamp_length(0, 100, peak=50, clip_cfg=CLIP, vod_length=1000)
-    assert end - start == CLIP["target_seconds"]
-    assert start < 50 < end
-    assert abs((50 - start) - 0.45 * CLIP["target_seconds"]) < 0.01
+    assert start == 0 and end == 50 + CLIP["reaction_keep"]
+    # Only beyond max_seconds_setup does the start move.
+    start, end = clamp_length(0, 100, peak=70, clip_cfg=CLIP, vod_length=1000)
+    assert end == 70 + CLIP["reaction_keep"] and end - start == CLIP["max_seconds_setup"]
 
 
 def test_clamp_too_short_grows_60_40():
     start, end = clamp_length(100, 110, peak=105, clip_cfg=CLIP, vod_length=1000)
-    assert (start, end) == (97.0, 112.0)
+    missing = CLIP["min_seconds"] - 10
+    assert (start, end) == (100 - 0.6 * missing, 110 + 0.4 * missing)
 
 
 def test_clamp_stays_inside_vod():

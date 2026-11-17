@@ -173,11 +173,13 @@ def main() -> None:
         used = 0
         for c in candidates:
             bounds = signals.viewer_clip_bounds(clips, c.peak)
-            if bounds and bounds[0] < c.peak < bounds[1]:
-                c.start, c.end = bounds   # where viewers cut it; speech snapping refines it below
+            if bounds and bounds[0] < c.peak < bounds[1] and (bounds[0] < c.start or bounds[1] > c.end):
+                # Viewers' cut can only make the clip LONGER (earlier start / later end), never
+                # cut away build-up the detector kept.
+                c.start, c.end = min(c.start, bounds[0]), max(c.end, bounds[1])
                 used += 1
         if used:
-            print(f"    {used} moments start from where viewers clipped them")
+            print(f"    {used} moments extended to where viewers clipped them")
 
     print("6/9 Transcribing candidate windows and snapping to speech")
     jcfg = cfg["judge"]
