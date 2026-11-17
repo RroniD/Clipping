@@ -334,6 +334,8 @@ def render_clip(source: Path, offset: float, duration: float, layout: Layout, as
            "-ss", f"{offset:.3f}", "-i", str(source.resolve()), "-t", f"{duration:.3f}",
            "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
            "-c:v", "libx264", "-preset", e["preset"], "-crf", str(e["crf"]), "-pix_fmt", "yuv420p",
+           # 0 = use every CPU core. Live mode sets fewer so a game/stream on the laptop stays smooth.
+           "-threads", str(e.get("threads", 0)),
            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out_path.resolve())]
     fetch.run(cmd, cwd=str(ass_path.parent))
     return out_path
@@ -421,10 +423,13 @@ class ClipRenderer:
 
     def render(self, out_dir: Path, data: dict, d: dict, start: float | None = None,
                end: float | None = None, layout_mode: str | None = None, hook: str | None = None,
-               out_name: str | None = None, captions: bool = True) -> Path:
+               out_name: str | None = None, captions: bool = True,
+               source: Path | None = None, source_start: float = 0.0) -> Path:
         """Render candidate `d` of candidates.json `data` and return the finished .mp4.
 
         start/end (VOD seconds), layout_mode and hook default to the candidate's own values.
+        source/source_start: a video that's already on disk and starts at VOD second
+        `source_start` (live mode cuts it from its own recording), instead of downloading.
         A small .json next to the .ass file records what was used, so the review queue knows.
         """
         cfg, e = self.cfg, self.cfg["edit"]
@@ -440,11 +445,12 @@ class ClipRenderer:
 
         # 1. Download just this section at up to 1080p. A little padding on both sides
         #    so the cut in step 3 lands on exact frames.
-        pad = cfg["download"]["padding"]
-        src_start = max(0.0, start - pad)
-        source = out_dir / "sources" / f"{start:.0f}-{end:.0f}.mp4"
-        fetch.download_section(url, src_start, end + pad, source, e["source_format"])
-        offset = start - src_start
+        if source is None:
+            pad = cfg["download"]["padding"]
+            source_start = max(0.0, start - pad)
+            source = out_dir / "sources" / f"{start:.0f}-{end:.0f}.mp4"
+            fetch.download_section(url, source_start, end + pad, source, e["source_format"])
+        offset = start - source_start
 
         # 2. Word timings: from run.py if it saved them, else transcribe this clip now.
         #    run.py only saved words inside the original clip, so a clip trimmed LONGER needs

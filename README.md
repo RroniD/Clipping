@@ -1,7 +1,7 @@
 # AutoClipper
 
 Finds the most clip-worthy moments in Twitch and Kick VODs. The full plan is in [CLAUDE.md](CLAUDE.md).
-**Built so far: Stage 1 (the detector), Stage 1b (the AI judge), Stage 2 (the editor) and Stage 3 (the review queue).** It turns a VOD URL into
+**Built so far: Stage 1 (the detector), Stage 1b (the AI judge), Stage 2 (the editor), Stage 3 (the review queue) and Stage 4 (live mode).** It turns a VOD URL into
 `candidates.json` plus short horizontal preview clips, each rated by an AI model with a hook, a title
 and a spoiler check, and then into finished vertical 9:16 clips with captions. You approve or reject them on your phone. It doesn't post or upload anything.
 
@@ -177,3 +177,37 @@ Re-importing (restarting the queue after rendering more clips) only adds new cli
 and approve or reject clips (still nothing gets posted). Only run it on your home Wi-Fi. To use it away from home later,
 install Tailscale on the laptop and the phone and open `http://<laptop's Tailscale address>:8000`.
 Settings (port, trim step, min/max length) are in the `[queue]` section of `config.toml`.
+
+## Stage 4: live mode
+
+```powershell
+python -m clipper.live                 # watch every streamer in streamers.toml
+python -m clipper.live --only name1    # just one
+python -m clipper.queue_app            # in a second PowerShell window: the review queue
+```
+
+Leave it running. Every minute it asks Twitch (and Kick) which allow-listed streamers are live. For each live one it:
+1. records chat (Twitch: anonymous read-only IRC, no login needed; Kick: the same recorder as `clipper.kick_chat`)
+2. records the stream into 10-second pieces in `out\<streamer>\live_<start time>\buffer\` and deletes pieces older than
+   6 minutes, so it uses a few hundred MB of disk (but ~3 GB of download per hour at 1080p)
+3. every 5 s scores the last 15 minutes with the same signals as Stage 1
+4. once a moment's reaction has played out (45 s), cuts it from the recording, transcribes it, snaps it to sentences, asks the
+   AI judge (if `ANTHROPIC_API_KEY` is set), edits it (Stage 2) and adds it to the review queue as **pending**.
+   The terminal prints `clip ready in the review queue: ...` with how long after the moment it was ready (usually 1-3 min).
+
+Nothing is posted. Clips with a warning arrive marked ⚠. It only ever watches streamers in `streamers.toml`.
+Chat and loudness are saved as they arrive (`chat.jsonl`, `audio_db.npy`; `chat.json` on stop), so a crash loses nothing and
+`run.py <VOD url> --chat out\<streamer>\live_...\chat.json` can reuse the chat later. Restarting during the same stream
+continues in the same folder and doesn't clip the same moments again. Ctrl+C stops recording and finishes the clips that
+are being made (Ctrl+C again to quit right away). If Python is closed or crashes, Windows stops the recorder too.
+
+Good to know:
+- Twitch shows ads to viewers without Turbo; if the streamer runs an ad break, the recording has the ad for those minutes.
+  Moments almost never happen then, but look at each clip in the queue anyway.
+- Live layout: clips use the streamer's layout from `streamers.toml`; fix scene changes in the queue with the Layout switch.
+- Laptop load: recording is just copying data (almost no CPU). Making a clip uses the GPU (Whisper) and 4 CPU threads (x264)
+  for ~30 s, one clip at a time. If you game on the same laptop, set `whisper_model = "small"` in `[live]` of `config.toml`.
+- Test on any channel without saving anything: `python -m clipper.live --test-channel <name>` prints the moments it would clip
+  and saves no clips (hard rule 3). Delete `out\_live_test` afterwards.
+- Twitch's "create clip" API isn't used: it needs a Twitch login (OAuth with `clips:edit`) and we already have the moment
+  in our own recording.
