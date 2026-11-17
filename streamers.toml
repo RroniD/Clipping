@@ -1,0 +1,10 @@
+# Allow-list (CLAUDE.md hard rule 3): the tool refuses to clip any channel not listed here.
+# Only add streamers who allow or pay for clipping.
+#
+# The table name is the channel's login name, lowercase, exactly as in the URL
+# (twitch.tv/<name> or kick.com/<name>).
+# Stage 2 will add layout boxes (facecam / gameplay crop) to each entry.
+
+# [streamers.examplestreamer]
+# platform = "twitch"     # "twitch" or "kick"
+# note = "Paid campaign via Content Rewards"
