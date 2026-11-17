@@ -294,6 +294,18 @@ def main() -> None:
     candidates = [candidates[i] for i in final_order]
     for rank, d in enumerate(results, 1):
         d["rank"] = rank
+    # Pick split / no_facecam / crop per kept clip: streamers switch scenes, and a webcam box
+    # that shows chat instead of a face would end up on top of the vertical clip.
+    if cfg["layout"]["auto"]:
+        from clipper.edit import layout_for
+        from clipper.layoutcheck import choose_layout
+        facecam = layout_for(streamer_cfg).facecam if streamer_cfg.get("facecam") else None
+        for d in results:
+            if d["kept"]:
+                choose_layout(d, out_dir / d["analysis"] if d.get("analysis") else None,
+                              d["window_start"], facecam, cfg)
+        changed = sum(1 for d in results if d["kept"] and d.get("layout") != streamer_cfg.get("layout", "split"))
+        print(f"    layout: {changed} kept clip(s) need a different layout than the streamer's default")
     flagged = sum(d["warning"] for d in results if d["kept"])
     print(f"    kept {sum(d['kept'] for d in results)} of {len(results)} moments "
           f"({n_explore} explore picks); {flagged} kept clip(s) have a warning (preview names start with WARN)")

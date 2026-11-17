@@ -18,6 +18,7 @@ from clipper.transcribe import Word
 CFG = load_config(None)
 GOOD = {"category": "funny", "standalone": 8, "hook_strength": 7, "payoff": 9, "score": 8,
         "visual_payoff": 7, "facecam_reaction": "big", "is_cutscene": False, "menu_or_map": False,
+        "layout": "split",
         "setup_start": 5.0, "cut_start": 5.0, "cut_end": 30.0, "hook": "He did NOT see that coming",
         "context_line": "Speed trusts his crew with the money", "title": "Speed trusted his crew... mistake",
         "hashtags": ["#ishowspeed", "gta", "funny"], "spoiler_risk": "none", "reason": "Funny crash."}

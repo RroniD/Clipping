@@ -104,6 +104,15 @@ hud_missing_seconds = 5
 blank_std = 8              # an (almost) single-colour frame = loading/black screen...
 blank_seconds = 3          # ...for at least this long
 
+[layout]
+# Pick split / no_facecam / crop per clip (clipper/layoutcheck.py + the AI judge).
+auto = true                # false = always use the streamer's layout from streamers.toml
+face_skin = 0.30           # facecam box has a face: >= 30% skin-coloured pixels...
+box_max_motion = 15        # ...and the box is steady (webcam ~7; game scenery 27-40 in real clips)
+fullscreen_face_skin = 0.35   # no face in the box but >= 35% skin in the middle of the frame...
+fullscreen_max_motion = 20    # ...and it's steady -> fullscreen camera ("crop")
+text_detail = 25           # lots of fine detail in the box (chat text)
+
 [judge]
 # The AI model watches each candidate, picks the cut, rates it and flags spoilers.
 # Needs ANTHROPIC_API_KEY in .env. Run with --no-judge to skip it.

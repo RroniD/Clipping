@@ -64,6 +64,7 @@ JUDGE_SCHEMA = {
         "visual_payoff": {"type": "integer", "description": "1-10: how much the frames show it (vs. only talk)"},
         "facecam_reaction": {"type": "string", "enum": list(REACTIONS)},
         "is_cutscene": {"type": "boolean"},
+        "layout": {"type": "string", "enum": ["split", "no_facecam", "crop"]},
         "menu_or_map": {"type": "boolean"},
         "hook": {"type": "string", "description": "on-screen text for the first 2 s, max 8 words"},
         "context_line": {"type": "string", "description": "max 10 words: who/what, shown as a banner"},
@@ -73,7 +74,7 @@ JUDGE_SCHEMA = {
         "reason": {"type": "string"},
     },
     "required": ["category", "standalone", "hook_strength", "payoff", "score", "setup_start", "cut_start", "cut_end",
-                 "visual_payoff", "facecam_reaction", "is_cutscene", "menu_or_map", "hook", "context_line",
+                 "visual_payoff", "facecam_reaction", "is_cutscene", "menu_or_map", "layout", "hook", "context_line",
                  "title", "hashtags", "spoiler_risk", "reason"],
     "additionalProperties": False,
 }
@@ -115,6 +116,10 @@ From the frames:
 - is_cutscene: true if frames look like a story cutscene (cinematic bars, no HUD, scripted camera).
 - menu_or_map: true if it's mostly a menu, map, loading screen, or a browser/desktop with nothing \
 happening.
+- layout (how to make the vertical video): "split" if the streamer's WEBCAM is visible as a small box \
+over the game/screen during most of the clip (we put the face on top, the game below); "crop" if \
+the whole frame is the streamer's camera with no game (IRL / just chatting); "no_facecam" if it's \
+fullscreen gameplay without a visible webcam, or the webcam spot shows chat or something else.
 
 hook: at most 8 words of on-screen text for the first 2 seconds. It should raise a question or \
 name the stakes ("He robbed the WRONG guy", "Chat told him not to..."). No generic hooks like \
@@ -226,6 +231,7 @@ def validate(data: dict, window_len: float | None = None) -> dict:
     return {**scores, "category": category, "hook": hook, "title": str(data["title"]).strip()[:100],
             "context_line": context, "facecam_reaction": reaction,
             "is_cutscene": bool(data["is_cutscene"]), "menu_or_map": bool(data["menu_or_map"]),
+            "layout": data["layout"] if data.get("layout") in ("split", "no_facecam", "crop") else None,
             "hashtags": tags, "spoiler_risk": data["spoiler_risk"], "reason": str(data["reason"]).strip(),
             "cut_start": round(cut_start, 2), "cut_end": round(cut_end, 2), "setup_start": round(setup_start, 2)}
 

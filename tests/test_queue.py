@@ -180,3 +180,23 @@ def test_render_checks_campaign_names(tmp_path, monkeypatch):
     assert client.post(f"/api/clips/{cid}/render", json={"campaign": "nope"}).status_code == 400
     assert client.post(f"/api/clips/{cid}/render", json={"campaign": "acme"}).status_code == 200
     assert client.get("/api/campaigns").get_json()["acme"]["name"] == "Acme"
+
+
+def test_approved_clip_never_jumps_to_a_different_moment(tmp_path):
+    """Re-processing a VOD can give rank 1 to another moment: an approved clip must keep its own."""
+    out_root = tmp_path / "out"
+    vod = make_vod(out_root)
+    db = queue_app.connect(tmp_path / "q.db")
+    queue_app.import_clips(db, out_root)
+    db.execute("UPDATE clips SET status='approved' WHERE rank=1")
+    db.commit()
+    # The VOD is processed again: rank 1 is now a different moment, the old file is gone.
+    data = json.loads((vod / "candidates.json").read_text())
+    data["candidates"][0]["peak_time"] = "1h00m00s"
+    (vod / "candidates.json").write_text(json.dumps(data))
+    old = vod / "final" / "01_0h01m00s.mp4"
+    old.rename(vod / "final" / "01_1h00m00s.mp4")
+    queue_app.import_clips(db, out_root)
+    row = db.execute("SELECT video, status, peak_time FROM clips WHERE rank=1").fetchone()
+    assert row["status"] == "approved" and row["peak_time"] == "0h01m00s"
+    assert row["video"].endswith("01_0h01m00s.mp4")       # still points at what you approved

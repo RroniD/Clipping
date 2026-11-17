@@ -101,6 +101,7 @@ EXTRA_COLUMNS = {
     "peak_score": "REAL",
     "ai_json": "TEXT NOT NULL DEFAULT '{}'",
     "breakdown_json": "TEXT NOT NULL DEFAULT '{}'",
+    "layout_reason": "TEXT NOT NULL DEFAULT ''",
 }
 
 
@@ -171,22 +172,25 @@ def import_clips(db: sqlite3.Connection, out_root: Path = OUT_ROOT) -> int:
                     """INSERT OR IGNORE INTO clips (streamer, vod_id, rank, peak_time, video, warning,
                          warning_reasons, ai_score, ai_reason, hook, title, transcript, final_score,
                          start, "end", layout, created_at, updated_at, category, hashtags, context_line,
-                         campaign, explore, peak_score, ai_json, breakdown_json)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         campaign, explore, peak_score, ai_json, breakdown_json, layout_reason)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (data["streamer"], data["vod_id"], rank, d.get("peak_time"), video,
                      int(bool(reasons)), json.dumps(reasons),
                      ai.get("score"), ai.get("reason", ""), used.get("hook", ai.get("hook", "")),
                      ai.get("title", ""), d.get("transcript", ""), d.get("final_score", d.get("peak_score")),
                      used.get("start", d["start"]), used.get("end", d["end"]),
-                     used.get("layout", "split"), now, now, ai.get("category", ""),
+                     used.get("layout", d.get("layout", "split")), now, now, ai.get("category", ""),
                      json.dumps(ai.get("hashtags", [])), used.get("banner", ai.get("context_line", "")),
                      used.get("campaign") or "", int(bool(d.get("explore"))), d.get("peak_score"),
-                     json.dumps(ai), json.dumps(d.get("breakdown", {}))))
+                     json.dumps(ai), json.dumps(d.get("breakdown", {})),
+                     used.get("layout_reason", d.get("layout_reason", ""))))
                 if cur.rowcount:
                     added += 1
                 else:
-                    row = db.execute("SELECT id, video, status FROM clips WHERE streamer=? AND vod_id=? AND rank=?",
+                    row = db.execute("SELECT id, video, status, peak_time FROM clips "
+                                     "WHERE streamer=? AND vod_id=? AND rank=?",
                                      (data["streamer"], data["vod_id"], rank)).fetchone()
+                    same_moment = row["peak_time"] == d.get("peak_time")
                     touched = db.execute("SELECT COUNT(*) FROM events WHERE clip_id=?", (row["id"],)).fetchone()[0]
                     if not (out_root / row["video"]).exists() and row["status"] == "pending" and not touched:
                         # The VOD was processed again and you never touched this clip: show the new one.
@@ -194,15 +198,19 @@ def import_clips(db: sqlite3.Connection, out_root: Path = OUT_ROOT) -> int:
                             """UPDATE clips SET video=?, peak_time=?, warning=?, warning_reasons=?, ai_score=?,
                                ai_reason=?, hook=?, title=?, transcript=?, final_score=?, start=?, "end"=?, layout=?,
                                category=?, hashtags=?, context_line=?, explore=?, peak_score=?, ai_json=?,
-                               breakdown_json=?, version=0, render_error='', updated_at=? WHERE id=?""",
+                               breakdown_json=?, layout_reason=?, version=0, render_error='', updated_at=? WHERE id=?""",
                             (video, d.get("peak_time"), int(bool(reasons)), json.dumps(reasons), ai.get("score"),
                              ai.get("reason", ""), used.get("hook", ai.get("hook", "")), ai.get("title", ""),
                              d.get("transcript", ""), d.get("final_score", d.get("peak_score")),
-                             used.get("start", d["start"]), used.get("end", d["end"]), used.get("layout", "split"),
+                             used.get("start", d["start"]), used.get("end", d["end"]), used.get("layout", d.get("layout", "split")),
                              ai.get("category", ""), json.dumps(ai.get("hashtags", [])),
                              used.get("banner", ai.get("context_line", "")), int(bool(d.get("explore"))),
-                             d.get("peak_score"), json.dumps(ai), json.dumps(d.get("breakdown", {})), now, row["id"]))
-                    elif not (out_root / row["video"]).exists():
+                             d.get("peak_score"), json.dumps(ai), json.dumps(d.get("breakdown", {})),
+                             used.get("layout_reason", d.get("layout_reason", "")), now, row["id"]))
+                    elif not (out_root / row["video"]).exists() and same_moment:
+                        # Only follow a clip to a new file when it's the SAME moment: re-processing a
+                        # VOD can give rank 3 to a different moment, and an approval must never jump
+                        # to a clip you didn't watch.
                         db.execute("UPDATE clips SET video=?, updated_at=? WHERE id=?", (video, now, row["id"]))
     return added
 
@@ -276,8 +284,9 @@ class RenderWorker:
         with self.lock, self.db:
             self.db.execute(
                 """UPDATE clips SET video=?, start=?, "end"=?, layout=?, hook=?, context_line=?, campaign=?,
-                   version=?, rendering=0, render_error='', updated_at=? WHERE id=?""",
+                   layout_reason=?, version=?, rendering=0, render_error='', updated_at=? WHERE id=?""",
                 (final.relative_to(self.out_root).as_posix(), start, end, layout, hook, banner, campaign,
+                 "picked by hand" if layout != row["layout"] else row["layout_reason"],
                  version, time.time(), clip_id))
         for path in (old, old.with_suffix(".jpg")):
             if path != final:
@@ -605,6 +614,7 @@ function card(c) {
         value="${l}">${{split: "Facecam on top + gameplay", no_facecam: "Gameplay, blurred background",
         crop: "Full-screen crop (camera / IRL)"}[l]}</option>`).join("")}
     </select>
+    ${c.layout_reason ? `<div class="meta">Layout: ${esc(c.layout_reason)}</div>` : ""}
     <div class="row">
       <button ${changed && !c.rendering ? "" : "disabled"} onclick="rerender(${c.id})">Re-render</button>
       ${changed ? `<button onclick="resetDraft(${c.id})">Undo changes</button>` : ""}

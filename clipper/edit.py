@@ -573,7 +573,9 @@ def render_vod(out_dir: Path, cfg: dict, top_n: int | None = None, only: list[in
     if streamer not in streamers:   # hard rule 3, checked again here
         raise SystemExit(f"Refusing to edit: {streamer} is not in streamers.toml.")
     e = cfg["edit"]
-    print(f"Layout for {streamer}: {streamer_layout(streamers[streamer], layout_override).mode}")
+    print(f"Layout for {streamer}: " + (layout_override or "chosen per clip (see layout_reason)"
+                                         if cfg["layout"]["auto"] else
+                                         streamer_layout(streamers[streamer], layout_override).mode))
 
     picked = []
     for d in data["candidates"]:
@@ -597,6 +599,26 @@ def render_vod(out_dir: Path, cfg: dict, top_n: int | None = None, only: list[in
         finals.append(renderer.render(out_dir, data, d, layout_mode=layout_override, captions=captions,
                                       campaign=campaign, safe_overlay=safe_overlay))
     return finals
+
+
+def choose_layouts(out_dir: Path, cfg: dict) -> list[tuple[int, str | None, str, str]]:
+    """Choose the layout of every kept clip of an already-processed VOD (no re-run needed) and
+    save it in candidates.json. Returns [(rank, old layout, new layout, reason)]."""
+    from clipper.layoutcheck import choose_layout
+    path = out_dir / "candidates.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    streamer_cfg = load_streamers().get(data["streamer"], {})
+    facecam = layout_for(streamer_cfg).facecam if streamer_cfg.get("facecam") else None
+    changes = []
+    for d in data["candidates"]:
+        if not d.get("kept", True):
+            continue
+        old = d.get("layout")
+        video = out_dir / d["analysis"] if d.get("analysis") else None
+        choose_layout(d, video, d.get("window_start", d["start"]), facecam, cfg)
+        changes.append((d["rank"], old, d["layout"], d["layout_reason"]))
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return changes
 
 
 def clip_name(d: dict) -> str:
@@ -653,7 +675,16 @@ class ClipRenderer:
         streamers = load_streamers()
         if streamer not in streamers:   # hard rule 3, checked again here
             raise SystemExit(f"Refusing to edit: {streamer} is not in streamers.toml.")
-        layout = streamer_layout(streamers[streamer], layout_mode)
+        # Layout: one you chose (queue / --layout) wins; else the per-clip choice from run.py
+        # (clipper.layoutcheck + the AI); else the streamer's default.
+        auto = d.get("layout") if cfg["layout"]["auto"] else None
+        layout = streamer_layout(streamers[streamer], layout_mode or auto)
+        if layout_mode and layout_mode != auto:
+            layout_reason = "picked by hand"
+        elif auto:
+            layout_reason = d.get("layout_reason", "")
+        else:
+            layout_reason = "streamer's default"
         profile = load_campaigns().get(campaign) if campaign else None
         if campaign and profile is None:
             raise ValueError(f"no campaign called {campaign!r} in campaigns.toml")
@@ -726,7 +757,8 @@ class ClipRenderer:
         if e["cover"]:
             save_cover(final, zoom_at if zoom_at is not None else min(1.0, edited / 2), final.with_suffix(".jpg"))
         (work / f"{name}.json").write_text(json.dumps(
-            {"rank": d["rank"], "start": start, "end": end, "layout": layout.mode, "hook": hook,
+            {"rank": d["rank"], "start": start, "end": end, "layout": layout.mode,
+             "layout_reason": layout_reason, "hook": hook,
              "banner": banner, "campaign": campaign, "duration": round(edited, 2),
              "cuts": len(segments) - 1 - (1 if lead_in else 0),
              "warnings": [music_warning] if music_warning else []}),
@@ -815,6 +847,8 @@ def main() -> None:
     f = sub.add_parser("frame", help="save a frame (+ pixel grid) to measure the layout boxes")
     f.add_argument("out_dir", type=Path, help=r"the VOD folder, e.g. out\ishowspeed\2928036561")
     f.add_argument("--at", help="time in the VOD, e.g. 1h02m03s (default: the top clip's peak)")
+    lp = sub.add_parser("layouts", help="(re)choose the layout of each kept clip from its frames")
+    lp.add_argument("out_dir", type=Path, help=r"the VOD folder, e.g. out\ishowspeed\2928036561")
     r = sub.add_parser("render", help="make the finished clips")
     r.add_argument("out_dir", type=Path, help=r"the VOD folder, e.g. out\ishowspeed\2928036561")
     r.add_argument("--top-n", type=int, help="override edit.top_n from config.toml")
@@ -838,6 +872,10 @@ def main() -> None:
     if args.command == "frame":
         for path in save_frame(out_dir, parse_time(args.at) if args.at else None, cfg):
             print(f"Saved {path}")
+        return
+    if args.command == "layouts":
+        for rank, old, new, reason in choose_layouts(out_dir, cfg):
+            print(f"  #{rank:2d}: {old or '-'} -> {new}   ({reason})")
         return
     only = [int(x) for x in args.only.split(",")] if args.only else None
     finals = render_vod(out_dir, cfg, args.top_n, only, args.include_warnings, not args.no_captions,

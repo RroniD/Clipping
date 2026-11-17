@@ -665,6 +665,13 @@ class ClipWorker(threading.Thread):
                   frames_per_candidate=[frames], vod_length=job.source_end)
         d["start_time"] = hms(d["start"])
         d["transcript"] = words_between(raw, d["start"], d["end"])
+        if cfg["layout"]["auto"]:   # split / no_facecam / crop for THIS moment's scene
+            from clipper.edit import layout_for
+            from clipper.layoutcheck import choose_layout
+            from clipper.config import load_streamers
+            streamer_cfg = load_streamers().get(s.name, {})
+            choose_layout(d, job.source, job.source_start,
+                          layout_for(streamer_cfg).facecam if streamer_cfg.get("facecam") else None, cfg)
         d["words"] = [[round(w.start, 2), round(w.end, 2), w.text]
                       for w in raw if w.end > d["window_start"] and w.start < d["window_end"]]
         d["words_range"] = [d["window_start"], d["window_end"]]
