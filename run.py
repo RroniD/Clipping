@@ -26,6 +26,7 @@ import numpy as np
 from dotenv import load_dotenv
 
 from clipper import fetch, signals
+from clipper.judge import Judge, judge_all
 from clipper.config import PROJECT_ROOT, load_config, load_streamers
 from clipper.scoring import clamp_length, find_candidates, snap_to_speech
 from clipper.transcribe import Transcriber, build_sentences, words_between
@@ -60,6 +61,7 @@ def main() -> None:
     p.add_argument("--top-n", type=int, help="override general.top_n from config.toml")
     p.add_argument("--config", type=Path, help="use a different config.toml")
     p.add_argument("--no-transcribe", action="store_true", help="skip Whisper (no speech snapping)")
+    p.add_argument("--no-judge", action="store_true", help="skip the AI judge (Stage 1b)")
     p.add_argument("--no-previews", action="store_true", help="don't download preview clips")
     p.add_argument("--debug", action="store_true", help="save debug_signals.png")
     args = p.parse_args()
@@ -69,18 +71,18 @@ def main() -> None:
     streamers = load_streamers()
     platform, vod_id = fetch.parse_vod_url(args.url)
 
-    print("1/7 Reading VOD info")
+    print("1/8 Reading VOD info")
     info = fetch.vod_info(args.url)
     streamer = check_allow_list(info, args.url, platform, streamers)
     out_dir = PROJECT_ROOT / "out" / streamer / vod_id
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"    {streamer} / {info.get('title', '')!r} -> {out_dir}")
 
-    print("2/7 Downloading audio only")
+    print("2/8 Downloading audio only")
     audio_path = fetch.download_audio(args.url, out_dir)
     n_seconds = int(math.ceil(fetch.media_duration(audio_path)))
 
-    print("3/7 Getting chat")
+    print("3/8 Getting chat")
     chat_path = args.chat
     if chat_path is None and platform == "twitch":
         try:
@@ -88,6 +90,7 @@ def main() -> None:
         except Exception as exc:
             print(f"    could not get Twitch chat ({exc}); continuing with audio only")
     raw: dict[str, np.ndarray] = {}
+    messages: list = []
     if chat_path:
         messages = signals.load_chat(chat_path)
         for m in messages:
@@ -97,7 +100,7 @@ def main() -> None:
     else:
         print("    no chat for this VOD: running on audio (and viewer clips) only")
 
-    print("4/7 Measuring audio loudness")
+    print("4/8 Measuring audio loudness")
     loud = signals.audio_loudness(audio_path, cfg["audio"]["sample_rate"])
     audio = np.full(n_seconds, loud.min() if len(loud) else -90.0)
     audio[: min(n_seconds, len(loud))] = loud[:n_seconds]
@@ -122,11 +125,11 @@ def main() -> None:
             print(f"    {len(clips)} viewer clips")
             raw["viewer_clips"] = signals.viewer_clip_signal(clips, n_seconds, cfg)
 
-    print("5/7 Scoring and picking peaks")
+    print("5/8 Scoring and picking peaks")
     z, score, candidates = find_candidates(raw, cfg, args.top_n)
     print(f"    {len(candidates)} candidates above threshold {cfg['peaks']['threshold']}")
 
-    print("6/7 Transcribing candidate windows and snapping to speech")
+    print("6/8 Transcribing candidate windows and snapping to speech")
     words_by_candidate = {}
     if not args.no_transcribe and candidates:
         transcriber = Transcriber(cfg)
@@ -143,21 +146,44 @@ def main() -> None:
             c.transcript = words_between(words_by_candidate[id(c)], c.start, c.end)
 
     results = []
-    for rank, c in enumerate(candidates, 1):
+    for c in candidates:
         d = c.to_dict()
-        d["rank"] = rank
         d["peak_time"] = hms(c.peak)
         d["start_time"] = hms(c.start)
         if platform == "twitch":
             d["vod_link"] = f"https://www.twitch.tv/videos/{vod_id}?t={hms(max(0, c.start))}"
         results.append(d)
 
-    print("7/7 Downloading preview sections")
+    print("7/8 AI judge: rating clips, writing hooks, checking for spoilers")
+    judge = None
+    if args.no_judge or not cfg["judge"]["enabled"]:
+        print("    skipped (--no-judge or judge.enabled = false)")
+    elif not os.getenv("ANTHROPIC_API_KEY"):
+        print("    no ANTHROPIC_API_KEY in .env: skipping the AI judge")
+    else:
+        judge = Judge(cfg)
+    words_per_candidate = [words_by_candidate.get(id(c)) for c in candidates]
+    judge_all(results, words_per_candidate, messages, z.get("chat"), cfg, streamer,
+              info.get("title", ""), judge)
+
+    # Best first by signal score x AI score. Keep `candidates` in the same order so the
+    # rank numbers in the debug plot match candidates.json and the preview names.
+    order = sorted(range(len(results)), key=lambda i: results[i]["final_score"], reverse=True)
+    results = [results[i] for i in order]
+    candidates = [candidates[i] for i in order]
+    for rank, d in enumerate(results, 1):
+        d["rank"] = rank
+    flagged = sum(d["warning"] for d in results)
+    if flagged:
+        print(f"    {flagged} clip(s) flagged with a warning (possible spoiler/cutscene): "
+              "their preview names start with WARN")
+
+    print("8/8 Downloading preview sections")
     pad = cfg["download"]["padding"]
     for d in results:
         if args.no_previews:
             break
-        name = f"{d['rank']:02d}_{d['peak_time']}.mp4"
+        name = f"{d['rank']:02d}_{'WARN_' if d['warning'] else ''}{d['peak_time']}.mp4"
         try:
             path = fetch.download_section(args.url, max(0, d["start"] - pad), d["end"] + pad,
                                           out_dir / "previews" / name, cfg["download"]["preview_format"])

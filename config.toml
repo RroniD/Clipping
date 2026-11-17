@@ -63,6 +63,21 @@ window_padding = 10        # transcribe this many seconds around each rough clip
 fallback_model = "small"   # used on CPU if the GPU setup fails
 sentence_gap = 0.8         # a pause this long (s) also ends a sentence
 
+[judge]
+# Stage 1b: the AI model rates each candidate, writes a hook/title and flags spoilers.
+# Needs ANTHROPIC_API_KEY in .env. Run with --no-judge to skip it.
+enabled = true
+model = "claude-opus-5-5"     # cheaper option: "claude-haiku-5-5"
+effort = "low"                # how hard the model thinks: low / medium / high
+max_candidates = 20           # only the best N candidates are judged, to keep cost down
+max_tokens = 4000
+chat_sample = 25              # how many chat messages from the clip the model sees
+fallbacks = true              # if the model declines a clip, retry on a fallback model
+warn_on = ["low", "high"]     # spoiler_risk levels that get the warning flag
+cutscene_quiet_seconds = 12   # flag clips with this many seconds of no speech + quiet chat
+chat_quiet_z = 0.0            # "quiet chat" = chat z-score at or below this
+neutral_score = 5             # AI score used for clips that couldn't be judged
+
 [download]
 padding = 2                # extra seconds on both sides of each preview
 preview_format = "bv*[height<=720]+ba/b[height<=720]/b"
