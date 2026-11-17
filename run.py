@@ -318,6 +318,9 @@ def main() -> None:
     candidates_path.write_text(json.dumps({"url": args.url, "platform": platform, "vod_id": vod_id,
                                            "streamer": streamer, "title": info.get("title", ""),
                                            "vod_seconds": n_seconds, "chat_lag": cfg["chat"]["lag_seconds"],
+                                           "judge_model": cfg["judge"]["model"] if judge else None,
+                                           "judge_tokens": [judge.tokens_in, judge.tokens_out] if judge else None,
+                                           "judge_cost": round(judge.cost() or 0, 5) if judge else None,
                                            "signals": sorted(raw), "candidates": results},
                                           indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Saved {candidates_path}")

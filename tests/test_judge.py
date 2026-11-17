@@ -62,7 +62,7 @@ def test_validate_accepts_and_cleans():
     {**GOOD, "standalone": True},
     {**GOOD, "visual_payoff": 0},
     {**GOOD, "spoiler_risk": "maybe"},
-    {**GOOD, "hook": "one two three four five six seven eight nine"},
+    {**GOOD, "hook": "   "},
     {**GOOD, "cut_start": 20, "cut_end": 21},           # too short
     {**GOOD, "cut_start": "x"},
     {k: v for k, v in GOOD.items() if k != "title"},
@@ -258,3 +258,8 @@ def test_bad_key_stops_judging_instead_of_retrying_every_clip():
     judge_all(results, [None] * 3, [], None, CFG, "s", "t", Judge(CFG, client=client), log=lambda *_: None)
     assert len(client.calls) == 1
     assert all(d["ai"] is None for d in results)
+
+
+def test_long_hook_is_shortened_not_rejected():
+    out = validate({**GOOD, "hook": "one two three four five six seven eight nine ten eleven twelve"}, 40)
+    assert out["hook"] == "one two three four five six seven eight nine ten"

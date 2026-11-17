@@ -204,8 +204,12 @@ def validate(data: dict, window_len: float | None = None) -> dict:
         raise JudgeOutputError(f"spoiler_risk must be one of {SPOILER_LEVELS}, got {data['spoiler_risk']!r}")
     category = data["category"] if data["category"] in CATEGORIES else "other"
     hook = str(data["hook"]).strip()
-    if not hook or len(hook.split()) > 8:
-        raise JudgeOutputError(f"hook must be 1-8 words, got {hook!r}")
+    if not hook:
+        raise JudgeOutputError("empty hook")
+    if len(hook.split()) > 10:
+        # A slightly long hook is still a good hook: keep the first 10 words instead of throwing
+        # away the whole judgement (that lost 3 of 40 moments in a real run).
+        hook = " ".join(hook.split()[:10])
     try:
         cut_start, cut_end = float(data["cut_start"]), float(data["cut_end"])
         setup_start = float(data["setup_start"])
