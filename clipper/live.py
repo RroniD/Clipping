@@ -104,7 +104,8 @@ class LiveChecker:
                 raise
         return {s["user_login"].lower(): {
                     "start": datetime.fromisoformat(s["started_at"].replace("Z", "+00:00")),
-                    "title": s.get("title", "")} for s in data if s.get("type") == "live"}
+                    "title": s.get("title", ""), "game": s.get("game_name", "")}
+                for s in data if s.get("type") == "live"}
 
     @staticmethod
     def kick(slug: str) -> dict | None:
@@ -441,7 +442,7 @@ class LiveScorer:
                 continue   # too close to the window's left edge: its baseline is one-sided
             # Confirmed = the reaction has played out AND we've recorded past the clip's end,
             # plus room for snapping the end to the end of a sentence.
-            if now < max(peak + lv["confirm_seconds"], end + clip_cfg["snap_forward_max"] + 2):
+            if now < max(peak + lv["confirm_seconds"], end + after_margin(self.cfg)):
                 continue
             if any(abs(peak - e) < gap for e in self.emitted):
                 continue   # this moment was already clipped
@@ -471,6 +472,11 @@ class Session:
         self.start = live["start"]
         self.title = live.get("title", "")
         self.save_clips = save_clips
+        # Hard rule 2: GTA 6 footage from before the launch is pre-release footage.
+        from clipper.framecheck import launch_gate
+        self.launch_warning = launch_gate([self.title, live.get("game", "")], self.start, cfg)
+        if self.launch_warning:
+            log(name, f"WARNING: {self.launch_warning}. Every clip from this stream gets the warning flag.")
         self.vod_id = f"live_{self.start.strftime('%Y%m%d_%H%M%S')}"
         self.dir = out_root / name / self.vod_id
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -495,7 +501,7 @@ class Session:
         """If live mode was restarted during the same stream, pick up where it left off:
         reload the chat and audio so far and don't clip the same moments again."""
         msgs, self.chat_pos = read_new_chat(self.jsonl, 0)
-        self.scorer.add_messages(msgs)
+        self.scorer.add_messages(signals.clean_chat(msgs, self.cfg)[0])
         audio_path = self.dir / "audio_db.npy"
         if audio_path.exists():
             self.scorer.add_audio(0, np.load(audio_path))
@@ -515,7 +521,7 @@ class Session:
 
         # New chat since last time.
         msgs, self.chat_pos = read_new_chat(self.jsonl, self.chat_pos)
-        self.scorer.add_messages(msgs)
+        self.scorer.add_messages(signals.clean_chat(msgs, self.cfg)[0])   # no bots, !commands, sub notices
 
         # Loudness of every newly finished 10-s piece (decoding 10 s of audio is very cheap).
         for start, path in self.buffer.finished_segments():
@@ -536,9 +542,9 @@ class Session:
             log(self.name, f"moment at {hms(c.peak)} (score {c.peak_score:.1f}, {lag:.0f} s ago)")
             if not self.save_clips:
                 continue   # test mode on a channel that isn't allow-listed: never save clips
-            clip_cfg = self.cfg["clip"]
-            a = max(0.0, c.start - clip_cfg["snap_back_max"] - 2)
-            b = c.end + clip_cfg["snap_forward_max"] + 2
+            # Cut enough around the moment for speech snapping AND the AI judge's wider window.
+            a = max(0.0, c.start - before_margin(self.cfg))
+            b = c.end + after_margin(self.cfg)
             try:
                 source = self.dir / "sources" / f"{c.peak}.mp4"
                 source_start = self.buffer.cut(a, b, source)
@@ -605,8 +611,9 @@ class ClipWorker(threading.Thread):
                 self.busy = False
 
     def process(self, job: ClipJob) -> None:
-        from clipper.edit import ClipRenderer, clip_name
-        from clipper.judge import judge_all
+        from clipper import framecheck
+        from clipper.edit import ClipRenderer
+        from clipper.judge import extract_frames, frame_times, judge_all
         from clipper.queue_app import connect, import_clips
         from clipper.transcribe import Transcriber, build_sentences, words_between
 
@@ -632,16 +639,45 @@ class ClipWorker(threading.Thread):
         data = (json.loads(cands_path.read_text(encoding="utf-8")) if cands_path.exists() else
                 {"url": s.url, "platform": s.platform, "vod_id": s.vod_id, "streamer": s.name,
                  "live": True, "signals": [], "candidates": []})
+        j = cfg["judge"]
         d = c.to_dict()
-        d.update({"rank": len(data["candidates"]) + 1, "peak_time": hms(c.peak), "start_time": hms(c.start),
-                  "words": [[round(w.start, 2), round(w.end, 2), w.text]
-                            for w in raw if w.end > c.start and w.start < c.end]})
+        d.update({"rank": len(data["candidates"]) + 1, "peak_time": hms(c.peak),
+                  "window_start": round(max(job.source_start, c.start - j["window_before"]), 2),
+                  "window_end": round(min(job.source_end, c.end + j["window_after"]), 2),
+                  "chat_mood": signals.mood_mix(s.scorer.messages, c.start, c.end, cfg),
+                  "extra_warnings": [s.launch_warning] if s.launch_warning else []})
 
-        # AI judge (if ANTHROPIC_API_KEY is set) + the local cutscene check -> warning flag.
-        judge_all([d], [raw], s.scorer.messages, s.scorer.chat_z_full(int(c.end) + 1), cfg, s.name,
-                  s.title, self.judge, log=lambda text: log(s.name, text.strip()))
+        # Local frame check + frames for the AI, both straight from our own recording.
+        frames = []
+        try:
+            gray = framecheck.gray_frames(job.source, c.start - job.source_start, c.end - job.source_start)
+            stats = framecheck.frame_stats(gray, cfg, None)
+            d["framecheck_reasons"] = framecheck.framecheck_reasons(stats, None, cfg)
+            frames = extract_frames(job.source, job.source_start,
+                                    frame_times(d["window_start"], d["window_end"], c.peak, j["frames"]),
+                                    j["frame_width"])
+        except Exception as exc:
+            log(s.name, f"couldn't look at the frames ({exc})")
+
+        # AI judge (if ANTHROPIC_API_KEY is set): picks the cut, rates it, flags spoilers.
+        judge_all([d], [raw], s.scorer.messages, s.scorer.chat_z_full(int(d["window_end"]) + 1), cfg, s.name,
+                  s.title, self.judge, log=lambda text: log(s.name, text.strip()),
+                  frames_per_candidate=[frames], vod_length=job.source_end)
+        d["start_time"] = hms(d["start"])
+        d["transcript"] = words_between(raw, d["start"], d["end"])
+        d["words"] = [[round(w.start, 2), round(w.end, 2), w.text]
+                      for w in raw if w.end > d["window_start"] and w.start < d["window_end"]]
+        d["words_range"] = [d["window_start"], d["window_end"]]
+        # Live clips are rendered one by one, so a weak moment would waste a render and your time:
+        # if the AI rated it below `live.min_quality`, it's saved (for learning) but not edited.
+        d["kept"] = not (d["ai"] and d["ai_quality"] < cfg["live"]["min_quality"])
         data["candidates"].append(d)
         cands_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        if not d["kept"]:
+            log(s.name, f"moment at {hms(c.peak)} skipped: AI rated it {d['ai_quality']:.1f}/10 "
+                        f"({d['ai'].get('reason', '')})")
+            job.source.unlink(missing_ok=True)
+            return
 
         # Stage 2 edit straight from the cut piece. Warned clips are rendered too, so you can
         # look at them, but they arrive in the queue marked with the warning (hard rule 2).
@@ -658,6 +694,17 @@ class ClipWorker(threading.Thread):
 
 
 # --------------------------------------------------------------------------- main loop
+
+def before_margin(cfg: dict) -> float:
+    """Seconds recorded before a candidate's rough start: room to snap back to a sentence
+    start and for the AI judge's wider window."""
+    return max(cfg["clip"]["snap_back_max"], cfg["judge"]["window_before"]) + 2
+
+
+def after_margin(cfg: dict) -> float:
+    """Seconds needed after a candidate's rough end before it can be cut (same reasons)."""
+    return max(cfg["clip"]["snap_forward_max"], cfg["judge"]["window_after"]) + 2
+
 
 def live_cfg(cfg: dict) -> dict:
     """Live mode's tweaks on top of the normal config: e.g. fewer x264 threads so a game

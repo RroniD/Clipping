@@ -195,3 +195,4 @@ segment_seconds = 10       # the recording is saved in pieces this long
 buffer_format = "best[height<=1080]/best"
 x264_threads = 4           # CPU threads for rendering clips (fewer = smoother game/stream alongside)
 whisper_model = ""         # e.g. "small" to use less GPU while gaming; "" = same as [whisper]
+min_quality = 4.5          # AI quality below this (1-10): saved for learning, but not edited into a clip

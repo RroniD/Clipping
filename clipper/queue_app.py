@@ -33,7 +33,7 @@ import threading
 import time
 from pathlib import Path
 
-from clipper.config import PROJECT_ROOT, load_config
+from clipper.config import PROJECT_ROOT, load_campaigns, load_config
 
 OUT_ROOT = PROJECT_ROOT / "out"
 STATUSES = ("pending", "approved", "rejected")
@@ -67,7 +67,41 @@ CREATE TABLE IF NOT EXISTS clips (
     decided_at      REAL,
     UNIQUE (streamer, vod_id, rank)
 );
+
+-- Every decision you make, with what the tool knew at that moment (signals + AI ratings).
+-- python -m clipper.learn reads this to see which signals predict the clips you approve.
+CREATE TABLE IF NOT EXISTS events (
+    id       INTEGER PRIMARY KEY,
+    clip_id  INTEGER NOT NULL,
+    ts       REAL NOT NULL,
+    action   TEXT NOT NULL,           -- approved / rejected / pending / render / title / campaign / post
+    data     TEXT NOT NULL DEFAULT '{}'
+);
+
+-- Where each clip was posted. A post URL can belong to one campaign only: submitting the
+-- same post to two campaigns gets clips rejected (and can get you banned from both).
+CREATE TABLE IF NOT EXISTS posts (
+    id        INTEGER PRIMARY KEY,
+    clip_id   INTEGER NOT NULL,
+    campaign  TEXT NOT NULL DEFAULT '',
+    platform  TEXT NOT NULL DEFAULT '',
+    url       TEXT NOT NULL UNIQUE,
+    posted_at REAL NOT NULL
+);
 """
+
+# Columns added after Stage 3 shipped. connect() adds them to an existing queue.db, so your
+# old decisions are kept (SQLite can add columns in place).
+EXTRA_COLUMNS = {
+    "category": "TEXT NOT NULL DEFAULT ''",
+    "hashtags": "TEXT NOT NULL DEFAULT '[]'",
+    "context_line": "TEXT NOT NULL DEFAULT ''",
+    "campaign": "TEXT NOT NULL DEFAULT ''",
+    "explore": "INTEGER NOT NULL DEFAULT 0",
+    "peak_score": "REAL",
+    "ai_json": "TEXT NOT NULL DEFAULT '{}'",
+    "breakdown_json": "TEXT NOT NULL DEFAULT '{}'",
+}
 
 
 # --------------------------------------------------------------------------- database
@@ -80,7 +114,23 @@ def connect(db_path: Path) -> sqlite3.Connection:
     db = sqlite3.connect(str(db_path), check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
+    have = {r["name"] for r in db.execute("PRAGMA table_info(clips)")}
+    for name, kind in EXTRA_COLUMNS.items():
+        if name not in have:
+            db.execute(f"ALTER TABLE clips ADD COLUMN {name} {kind}")
+    db.commit()
     return db
+
+
+def log_event(db: sqlite3.Connection, clip_id: int, action: str, extra: dict | None = None) -> None:
+    """Record a decision together with everything the tool knew about the clip."""
+    row = db.execute("SELECT * FROM clips WHERE id=?", (clip_id,)).fetchone()
+    snapshot = {"breakdown": json.loads(row["breakdown_json"]), "ai": json.loads(row["ai_json"]),
+                "peak_score": row["peak_score"], "final_score": row["final_score"],
+                "explore": bool(row["explore"]), "rank": row["rank"], "duration": row["end"] - row["start"],
+                "warning": bool(row["warning"]), **(extra or {})}
+    db.execute("INSERT INTO events (clip_id, ts, action, data) VALUES (?,?,?,?)",
+               (clip_id, time.time(), action, json.dumps(snapshot)))
 
 
 def _rank_of(path: Path) -> int | None:
@@ -115,18 +165,23 @@ def import_clips(db: sqlite3.Connection, out_root: Path = OUT_ROOT) -> int:
             used = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
             ai = d.get("ai") or {}
             video = mp4.relative_to(out_root).as_posix()
+            reasons = list(d.get("warning_reasons", [])) + list(used.get("warnings", []))
             with db:
                 cur = db.execute(
                     """INSERT OR IGNORE INTO clips (streamer, vod_id, rank, peak_time, video, warning,
                          warning_reasons, ai_score, ai_reason, hook, title, transcript, final_score,
-                         start, "end", layout, created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         start, "end", layout, created_at, updated_at, category, hashtags, context_line,
+                         campaign, explore, peak_score, ai_json, breakdown_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (data["streamer"], data["vod_id"], rank, d.get("peak_time"), video,
-                     int(bool(d.get("warning"))), json.dumps(d.get("warning_reasons", [])),
+                     int(bool(reasons)), json.dumps(reasons),
                      ai.get("score"), ai.get("reason", ""), used.get("hook", ai.get("hook", "")),
                      ai.get("title", ""), d.get("transcript", ""), d.get("final_score", d.get("peak_score")),
                      used.get("start", d["start"]), used.get("end", d["end"]),
-                     used.get("layout", "split"), now, now))
+                     used.get("layout", "split"), now, now, ai.get("category", ""),
+                     json.dumps(ai.get("hashtags", [])), used.get("banner", ai.get("context_line", "")),
+                     used.get("campaign") or "", int(bool(d.get("explore"))), d.get("peak_score"),
+                     json.dumps(ai), json.dumps(d.get("breakdown", {}))))
                 if cur.rowcount:
                     added += 1
                 else:
@@ -137,12 +192,20 @@ def import_clips(db: sqlite3.Connection, out_root: Path = OUT_ROOT) -> int:
     return added
 
 
-def clip_dict(row: sqlite3.Row) -> dict:
+def clip_dict(row: sqlite3.Row, posts: list | None = None, submit_minutes: float = 30) -> dict:
     d = dict(row)
     d["warning"] = bool(d["warning"])
     d["warning_reasons"] = json.loads(d["warning_reasons"])
     d["rendering"] = bool(d["rendering"])
+    d["explore"] = bool(d.get("explore"))
     d["duration"] = round(d["end"] - d["start"], 2)
+    d["hashtags"] = json.loads(d.get("hashtags") or "[]")
+    d["ai"] = json.loads(d.pop("ai_json", None) or "{}")
+    d.pop("breakdown_json", None)
+    # Campaigns usually reward clips posted fast; the page counts down from approval.
+    d["submit_deadline"] = (d["decided_at"] + 60 * submit_minutes
+                            if d["status"] == "approved" and d["decided_at"] else None)
+    d["posts"] = [dict(p) for p in posts or []]
     return d
 
 
@@ -162,10 +225,11 @@ class RenderWorker:
         self.renderer = None
         threading.Thread(target=self._loop, daemon=True).start()
 
-    def submit(self, clip_id: int, start: float, end: float, layout: str, hook: str) -> None:
+    def submit(self, clip_id: int, start: float, end: float, layout: str, hook: str,
+               banner: str, campaign: str) -> None:
         with self.lock, self.db:
             self.db.execute("UPDATE clips SET rendering=1, render_error='' WHERE id=?", (clip_id,))
-        self.jobs.put((clip_id, start, end, layout, hook))
+        self.jobs.put((clip_id, start, end, layout, hook, banner, campaign))
 
     def _loop(self) -> None:
         while True:
@@ -177,7 +241,8 @@ class RenderWorker:
                     self.db.execute("UPDATE clips SET rendering=0, render_error=? WHERE id=?",
                                     (str(exc)[-500:], job[0]))
 
-    def _render(self, clip_id: int, start: float, end: float, layout: str, hook: str) -> None:
+    def _render(self, clip_id: int, start: float, end: float, layout: str, hook: str,
+                banner: str = "", campaign: str = "") -> None:
         from clipper.edit import ClipRenderer, clip_name   # heavy imports only when needed
         if self.renderer is None:
             self.renderer = ClipRenderer(self.cfg)
@@ -190,19 +255,21 @@ class RenderWorker:
         # A NEW file name for every version: on Windows a file can't be replaced while the
         # phone is still streaming it, and a new name also stops the browser showing a cached copy.
         final = self.renderer.render(vod_dir, data, d, start=start, end=end, layout_mode=layout,
-                                     hook=hook, out_name=f"{clip_name(d)}_v{version}")
+                                     hook=hook, banner=banner, campaign=campaign or None,
+                                     out_name=f"{clip_name(d)}_v{version}")
         old = self.out_root / row["video"]
         with self.lock, self.db:
             self.db.execute(
-                """UPDATE clips SET video=?, start=?, "end"=?, layout=?, hook=?, version=?,
-                   rendering=0, render_error='', updated_at=? WHERE id=?""",
-                (final.relative_to(self.out_root).as_posix(), start, end, layout, hook, version,
-                 time.time(), clip_id))
-        if old != final:
-            try:
-                old.unlink()   # best effort: it may still be open on the phone
-            except OSError:
-                pass
+                """UPDATE clips SET video=?, start=?, "end"=?, layout=?, hook=?, context_line=?, campaign=?,
+                   version=?, rendering=0, render_error='', updated_at=? WHERE id=?""",
+                (final.relative_to(self.out_root).as_posix(), start, end, layout, hook, banner, campaign,
+                 version, time.time(), clip_id))
+        for path in (old, old.with_suffix(".jpg")):
+            if path != final:
+                try:
+                    path.unlink()   # best effort: it may still be open on the phone
+                except OSError:
+                    pass
 
 
 # --------------------------------------------------------------------------- web app
@@ -233,15 +300,32 @@ def create_app(db_path: Path | None = None, out_root: Path = OUT_ROOT, cfg: dict
     def page():
         return PAGE.replace("__TRIM_STEP__", str(q["trim_step"]))
 
+    def full(clip_id: int) -> dict:
+        row = get_clip(clip_id)
+        with lock:
+            posts = db.execute("SELECT * FROM posts WHERE clip_id=? ORDER BY posted_at", (clip_id,)).fetchall()
+        return clip_dict(row, posts, q["submit_minutes"])
+
     @app.get("/api/clips")
     def list_clips():
         status = request.args.get("status", "pending")
         with lock:
-            rows = db.execute("SELECT * FROM clips WHERE status=? ORDER BY streamer, vod_id, rank",
+            # Re-import every call: live mode and `clipper.edit render` add clips while the queue runs.
+            import_clips(db, out_root)
+            rows = db.execute("SELECT * FROM clips WHERE status=? ORDER BY final_score DESC, rank",
                               (status,)).fetchall()
             counts = dict(db.execute("SELECT status, COUNT(*) FROM clips GROUP BY status").fetchall())
-        return jsonify({"clips": [clip_dict(r) for r in rows],
+            posts = db.execute("SELECT * FROM posts").fetchall()
+        by_clip: dict[int, list] = {}
+        for p in posts:
+            by_clip.setdefault(p["clip_id"], []).append(p)
+        return jsonify({"clips": [clip_dict(r, by_clip.get(r["id"]), q["submit_minutes"]) for r in rows],
                         "counts": {s: counts.get(s, 0) for s in STATUSES}})
+
+    @app.get("/api/campaigns")
+    def campaigns():
+        """Campaign profiles from campaigns.toml (what the picker offers)."""
+        return jsonify({name: {**c, "id": name} for name, c in load_campaigns().items()})
 
     @app.post("/api/clips/<int:clip_id>/text")
     def save_text(clip_id: int):
@@ -251,7 +335,30 @@ def create_app(db_path: Path | None = None, out_root: Path = OUT_ROOT, cfg: dict
         title = str(request.json.get("title", "")).strip()[:200]
         with lock, db:
             db.execute("UPDATE clips SET title=?, updated_at=? WHERE id=?", (title, time.time(), clip_id))
-        return jsonify(clip_dict(get_clip(clip_id)))
+            log_event(db, clip_id, "title", {"title": title})
+        return jsonify(full(clip_id))
+
+    @app.post("/api/clips/<int:clip_id>/posts")
+    def add_post(clip_id: int):
+        """Log where you posted an approved clip (and for which campaign)."""
+        row = get_clip(clip_id)
+        body = request.json or {}
+        url = str(body.get("url", "")).strip()
+        if row["status"] != "approved":
+            return jsonify({"error": "Approve the clip before logging a post."}), 409
+        if not re.match(r"^https?://\S+$", url):
+            return jsonify({"error": "Paste the full link of the post (https://...)."}), 400
+        with lock:
+            taken = db.execute("SELECT clip_id, campaign FROM posts WHERE url=?", (url,)).fetchone()
+            if taken:
+                return jsonify({"error": f"This post is already logged (clip {taken['clip_id']}, "
+                                         f"campaign '{taken['campaign'] or 'none'}'). One post = one campaign."}), 409
+            with db:
+                db.execute("INSERT INTO posts (clip_id, campaign, platform, url, posted_at) VALUES (?,?,?,?,?)",
+                           (clip_id, row["campaign"], str(body.get("platform", ""))[:20], url,
+                            float(body.get("posted_at") or time.time())))
+                log_event(db, clip_id, "post", {"platform": body.get("platform", ""), "campaign": row["campaign"]})
+        return jsonify(full(clip_id))
 
     @app.post("/api/clips/<int:clip_id>/status")
     def set_status(clip_id: int):
@@ -267,11 +374,12 @@ def create_app(db_path: Path | None = None, out_root: Path = OUT_ROOT, cfg: dict
         with lock, db:
             db.execute("UPDATE clips SET status=?, decided_at=?, updated_at=? WHERE id=?",
                        (status, time.time() if status != "pending" else None, time.time(), clip_id))
-        return jsonify(clip_dict(get_clip(clip_id)))
+            log_event(db, clip_id, status)
+        return jsonify(full(clip_id))
 
     @app.post("/api/clips/<int:clip_id>/render")
     def rerender(clip_id: int):
-        """Re-render with new start/end (trim), layout and/or hook."""
+        """Re-render with new start/end (trim), layout, hook, context line and/or campaign."""
         row = get_clip(clip_id)
         if worker is None:
             abort(503, "rendering is off")
@@ -280,14 +388,23 @@ def create_app(db_path: Path | None = None, out_root: Path = OUT_ROOT, cfg: dict
         end = float(body.get("end", row["end"]))
         layout = body.get("layout", row["layout"])
         hook = str(body.get("hook", row["hook"])).strip()[:80]
+        banner = " ".join(str(body.get("context_line", row["context_line"])).split())[:90]
+        campaign = str(body.get("campaign", row["campaign"]) or "")
         if layout not in LAYOUTS:
             abort(400, "unknown layout")
+        if campaign and campaign not in load_campaigns():
+            return jsonify({"error": f"No campaign '{campaign}' in campaigns.toml."}), 400
         if not q["min_seconds"] <= end - start <= q["max_seconds"]:
             return jsonify({"error": f"A clip must be {q['min_seconds']}-{q['max_seconds']} s long."}), 400
         if row["rendering"]:
             return jsonify({"error": "Already re-rendering this clip."}), 409
-        worker.submit(clip_id, start, end, layout, hook)
-        return jsonify(clip_dict(get_clip(clip_id)))
+        with lock, db:
+            log_event(db, clip_id, "render", {
+                "start_delta": round(start - row["start"], 2), "end_delta": round(end - row["end"], 2),
+                "layout": layout, "hook_changed": hook != row["hook"],
+                "context_changed": banner != row["context_line"], "campaign": campaign})
+        worker.submit(clip_id, start, end, layout, hook, banner, campaign)
+        return jsonify(full(clip_id))
 
     @app.get("/video/<int:clip_id>")
     def video(clip_id: int):
@@ -376,6 +493,7 @@ PAGE = r"""<!doctype html>
 <main id="list"></main>
 <script>
 const STEP = __TRIM_STEP__;
+let CAMPAIGNS = {};
 let tab = "pending";
 let clips = [];
 // Unsaved edits per clip (trim / layout / hook), kept here until you press "Re-render".
@@ -409,7 +527,7 @@ function render() {
   const keep = new Set(clips.map(c => "c" + c.id));
   [...list.children].forEach(el => { if (!keep.has(el.id)) el.remove(); });
   clips.forEach((c, i) => {
-    const sig = c.version + c.status + c.rendering + c.render_error + c.title;
+    const sig = c.version + c.status + c.rendering + c.render_error + c.title + c.posts.length;
     let el = document.getElementById("c" + c.id);
     if (el && el.dataset.sig === sig) { list.appendChild(el); return; }
     const fresh = document.createElement("div");
@@ -424,20 +542,42 @@ function render() {
 function card(c) {
   const d = draft[c.id] || {};
   const start = d.start ?? c.start, end = d.end ?? c.end;
-  const changed = d.start !== undefined || d.end !== undefined || d.layout !== undefined || d.hook !== undefined;
+  const changed = ["start", "end", "layout", "hook", "context_line", "campaign"].some(k => d[k] !== undefined);
   const ds = start - c.start, de = end - c.end;
+  const ai = c.ai || {};
+  const camp = CAMPAIGNS[d.campaign ?? c.campaign];
+  const sub = ai.standalone ? ` · makes sense ${ai.standalone} · hook ${ai.hook_strength} · payoff ${ai.payoff}` +
+    ` · visual ${ai.visual_payoff}${ai.facecam_reaction === "big" ? " · big reaction" : ""}` : "";
+  const left = c.submit_deadline ? Math.round((c.submit_deadline * 1000 - Date.now()) / 60000) : null;
   return `
     <div class="meta">#${c.rank} · ${esc(c.streamer)} · peak ${esc(c.peak_time)} · ${(end - start).toFixed(0)} s
-      ${c.ai_score != null ? " · AI " + c.ai_score + "/10" : ""}</div>
+      ${c.ai_score != null ? " · AI " + c.ai_score + "/10" : ""}${ai.category ? " · " + esc(ai.category) : ""}
+      ${c.explore ? ' · <b title="A lower-ranked pick, included so the tool can learn if its ranking is right">explore</b>' : ""}</div>
+    ${sub ? `<div class="meta">${sub}</div>` : ""}
     ${c.warning ? `<div class="warnbox">⚠ Possible spoiler / cutscene: ${esc(c.warning_reasons.join(", "))}.
        Watch it fully before approving.</div>` : ""}
+    ${left !== null ? `<div class="warnbox" style="background:${left > 0 ? "#2e9d4f" : "#c0392b"};color:#fff">
+       ${left > 0 ? `Post + submit within ${left} min` : `Submit window passed ${-left} min ago`}</div>` : ""}
     <video controls playsinline preload="metadata" src="/video/${c.id}?v=${c.version}#t=0.1"></video>
     ${c.ai_reason ? `<div class="meta">AI: ${esc(c.ai_reason)}</div>` : ""}
     ${c.transcript ? `<div class="meta">“${esc(c.transcript.slice(0, 220))}${c.transcript.length > 220 ? "…" : ""}”</div>` : ""}
     <label>Title (for posting later)</label>
     <input value="${esc(c.title)}" onchange="saveTitle(${c.id}, this.value)">
-    <label>Hook (text on screen for the first 2 s)</label>
+    ${c.hashtags.length ? `<div class="meta">${c.hashtags.map(t => "#" + esc(t)).join(" ")}
+       <a href="#" onclick="copyText('${esc((c.title + " " + c.hashtags.map(t => "#" + t).join(" ")).replace(/'/g, ""))}');return false">copy title + tags</a></div>` : ""}
+    <label>Hook (big text for the first 2 s)</label>
     <input value="${esc(d.hook ?? c.hook)}" oninput="edit(${c.id}, 'hook', this.value, false)">
+    <label>Context line (banner for the rest of the clip; makes it count as original)</label>
+    <input value="${esc(d.context_line ?? c.context_line)}" oninput="edit(${c.id}, 'context_line', this.value, false)">
+    <label>Campaign</label>
+    <select onchange="edit(${c.id}, 'campaign', this.value)">
+      <option value="">(none)</option>
+      ${Object.values(CAMPAIGNS).filter(k => !k.streamer || k.streamer === c.streamer).map(k =>
+        `<option value="${esc(k.id)}" ${k.id === (d.campaign ?? c.campaign) ? "selected" : ""}>${esc(k.name || k.id)}</option>`).join("")}
+    </select>
+    ${camp ? `<div class="meta">Tags: ${esc((camp.required_tags || []).join(" ")) || "-"} · Platforms: ${esc((camp.platforms || []).join(", ")) || "-"}
+       ${camp.banned && camp.banned.length ? "<br>Not allowed: " + esc(camp.banned.join(", ")) : ""}
+       ${camp.rules_url ? `<br><a href="${esc(camp.rules_url)}" target="_blank">rules</a>` : ""}</div>` : ""}
     <label>Start ${ds ? (ds > 0 ? "+" : "") + ds + " s" : ""} (${fmt(start)})</label>
     <div class="row"><button onclick="trim(${c.id}, 'start', -STEP)">− ${STEP} s</button>
       <button onclick="trim(${c.id}, 'start', STEP)">+ ${STEP} s</button></div>
@@ -460,7 +600,25 @@ function card(c) {
       ${c.status !== "pending" ? `<button onclick="decide(${c.id}, 'pending')">Back to pending</button>` : ""}
     </div>
     <div class="status" id="s${c.id}">${c.rendering ? "Re-rendering… (this takes up to a minute)" : esc(c.render_error && "Re-render failed: " + c.render_error)}</div>
+    ${c.status === "approved" ? `
+      <label>Posted it? Log the link (one post = one campaign)</label>
+      <div class="row"><select id="pf${c.id}"><option>tiktok</option><option>youtube</option><option>instagram</option><option>other</option></select>
+        <input id="pu${c.id}" placeholder="https://..."></div>
+      <div class="row"><button onclick="logPost(${c.id})">Save post link</button></div>
+      ${c.posts.map(p => `<div class="meta">${esc(p.platform)}: <a href="${esc(p.url)}" target="_blank">${esc(p.url)}</a>
+        ${p.campaign ? "(" + esc(p.campaign) + ")" : ""} · ${new Date(p.posted_at * 1000).toLocaleString()}</div>`).join("")}` : ""}
     <div class="meta"><a href="/video/${c.id}?download=1">Download</a></div>`;
+}
+
+async function logPost(id) {
+  const url = document.getElementById("pu" + id).value.trim();
+  const platform = document.getElementById("pf" + id).value;
+  try { await api(`/api/clips/${id}/posts`, {url, platform}); redrawAfterLoad(id); }
+  catch (e) { say(id, e.message); }
+}
+async function redrawAfterLoad(id) { await load(); redraw(id); }
+function copyText(text) {
+  navigator.clipboard && navigator.clipboard.writeText(text).then(() => alert("Copied"), () => prompt("Copy:", text));
 }
 
 function redraw(id) {
@@ -509,7 +667,9 @@ document.querySelectorAll("header button").forEach(b =>
   b.onclick = () => { tab = b.dataset.tab; document.getElementById("list").innerHTML = ""; load(); });
 // While something is re-rendering, check every 3 s so the new video appears by itself.
 setInterval(() => { if (clips.some(c => c.rendering)) load(); }, 3000);
-load();
+// Keep the submit countdowns current.
+setInterval(() => { if (clips.some(c => c.submit_deadline)) clips.filter(c => c.submit_deadline).forEach(c => redraw(c.id)); }, 60000);
+api("/api/campaigns").then(c => { CAMPAIGNS = c; }).catch(() => {}).finally(load);
 </script>
 </body></html>
 """

@@ -210,7 +210,8 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                 'segment_seconds': 10,
                 'buffer_format': 'best[height<=1080]/best',
                 'x264_threads': 4,
-                'whisper_model': ''}}
+                'whisper_model': '',
+                'min_quality': 4.5}}
 
 
 def _merge(base: dict, override: dict) -> dict:

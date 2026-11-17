@@ -99,7 +99,7 @@ def test_rerender_validates_and_queues(tmp_path, monkeypatch):
     make_vod(out_root)
     jobs = []
     # Don't really render: record the job and pretend a new version was made.
-    def fake_render(self, clip_id, start, end, layout, hook):
+    def fake_render(self, clip_id, start, end, layout, hook, banner="", campaign=""):
         jobs.append((clip_id, start, end, layout, hook))
         with self.lock, self.db:
             self.db.execute('UPDATE clips SET start=?, "end"=?, layout=?, hook=?, version=version+1, '
@@ -124,3 +124,59 @@ def test_rerender_validates_and_queues(tmp_path, monkeypatch):
             break
         time.sleep(0.05)
     assert (after["layout"], after["hook"], after["version"]) == ("no_facecam", "NEW", 1)
+
+
+def test_old_database_gets_new_columns(tmp_path):
+    """A queue.db from before the upgrade keeps its rows and gains the new columns."""
+    import sqlite3
+    old = sqlite3.connect(tmp_path / "q.db")
+    old.executescript(queue_app.SCHEMA.split("-- Every decision")[0])
+    old.execute("INSERT INTO clips (streamer, vod_id, rank, video, start, \"end\", created_at, updated_at, status) "
+                "VALUES ('s','v',1,'x.mp4',0,30,0,0,'approved')")
+    old.commit()
+    old.close()
+    db = queue_app.connect(tmp_path / "q.db")
+    cols = {r["name"] for r in db.execute("PRAGMA table_info(clips)")}
+    assert {"context_line", "campaign", "explore", "ai_json"} <= cols
+    assert db.execute("SELECT status FROM clips").fetchone()["status"] == "approved"
+
+
+def test_decisions_are_logged_with_a_snapshot(tmp_path):
+    out_root = tmp_path / "out"
+    make_vod(out_root)
+    client = queue_app.create_app(db_path=tmp_path / "q.db", out_root=out_root, cfg=load_config(),
+                                  start_worker=False).test_client()
+    cid = client.get("/api/clips").get_json()["clips"][0]["id"]
+    client.post(f"/api/clips/{cid}/status", json={"status": "rejected"})
+    client.post(f"/api/clips/{cid}/text", json={"title": "x"})
+    db = queue_app.connect(tmp_path / "q.db")
+    events = db.execute("SELECT action, data FROM events ORDER BY id").fetchall()
+    assert [e["action"] for e in events] == ["rejected", "title"]
+    snap = json.loads(events[0]["data"])
+    assert snap["ai"]["score"] == 7 and "breakdown" in snap and snap["rank"] == 1
+
+
+def test_post_links_one_post_one_campaign(client):
+    clips = client.get("/api/clips").get_json()["clips"]
+    a, b = clips[0]["id"], clips[1]["id"]
+    url = "https://www.tiktok.com/@me/video/123"
+    assert client.post(f"/api/clips/{a}/posts", json={"url": url}).status_code == 409   # not approved yet
+    client.post(f"/api/clips/{a}/status", json={"status": "approved"})
+    client.post(f"/api/clips/{b}/status", json={"status": "approved", "confirm_warning": True})
+    r = client.post(f"/api/clips/{a}/posts", json={"url": url, "platform": "tiktok"})
+    assert r.status_code == 200 and r.get_json()["posts"][0]["url"] == url
+    assert r.get_json()["submit_deadline"] > 0                     # countdown from approval
+    assert client.post(f"/api/clips/{b}/posts", json={"url": url}).status_code == 409   # same post twice
+    assert client.post(f"/api/clips/{a}/posts", json={"url": "not a link"}).status_code == 400
+
+
+def test_render_checks_campaign_names(tmp_path, monkeypatch):
+    out_root = tmp_path / "out"
+    make_vod(out_root)
+    monkeypatch.setattr(queue_app, "load_campaigns", lambda: {"acme": {"name": "Acme"}})
+    monkeypatch.setattr(queue_app.RenderWorker, "_render", lambda self, *a: None)
+    client = queue_app.create_app(db_path=tmp_path / "q.db", out_root=out_root, cfg=load_config()).test_client()
+    cid = client.get("/api/clips").get_json()["clips"][0]["id"]
+    assert client.post(f"/api/clips/{cid}/render", json={"campaign": "nope"}).status_code == 400
+    assert client.post(f"/api/clips/{cid}/render", json={"campaign": "acme"}).status_code == 200
+    assert client.get("/api/campaigns").get_json()["acme"]["name"] == "Acme"
