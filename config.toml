@@ -108,3 +108,11 @@ credit_size = 34
 ui_bottom_share = 0.20     # TikTok/Shorts/Reels buttons cover the bottom 20%: keep text above it
 loudness_lufs = -14        # what the platforms normalise to
 duck_music_db = 0          # >0 lowers volume by this many dB when nobody talks (does NOT remove music)
+
+[queue]
+# Stage 3: review queue (python -m clipper.queue_app), open it on your phone on the same Wi-Fi
+host = "0.0.0.0"           # 0.0.0.0 = reachable from other devices on your Wi-Fi; "127.0.0.1" = this laptop only
+port = 8000
+trim_step = 2              # seconds per tap on the trim buttons
+min_seconds = 5            # trimming can't make a clip shorter / longer than this
+max_seconds = 90

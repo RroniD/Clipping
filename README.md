@@ -1,9 +1,9 @@
 # AutoClipper
 
 Finds the most clip-worthy moments in Twitch and Kick VODs. The full plan is in [CLAUDE.md](CLAUDE.md).
-**Built so far: Stage 1 (the detector), Stage 1b (the AI judge) and Stage 2 (the editor).** It turns a VOD URL into
+**Built so far: Stage 1 (the detector), Stage 1b (the AI judge), Stage 2 (the editor) and Stage 3 (the review queue).** It turns a VOD URL into
 `candidates.json` plus short horizontal preview clips, each rated by an AI model with a hook, a title
-and a spoiler check, and then into finished vertical 9:16 clips with captions. It doesn't post or upload anything.
+and a spoiler check, and then into finished vertical 9:16 clips with captions. You approve or reject them on your phone. It doesn't post or upload anything.
 
 ## How it works (Stage 1)
 
@@ -146,3 +146,34 @@ What `render` does per clip:
 Clips flagged with a warning (possible spoiler/cutscene) are skipped unless you pass `--include-warnings`.
 Finished clips land in `out\<streamer>\<vod_id>\final\`. All the numbers (font, sizes, positions, quality) are
 in the `[edit]` section of `config.toml`.
+
+## Stage 3: review queue (approve clips from your phone)
+
+```powershell
+python -m clipper.queue_app
+```
+
+It imports every finished clip in `out\<streamer>\<vod_id>\final\` into a database (`out\queue.db`) and prints two
+addresses: one for the laptop and one for your phone, e.g. `http://192.168.1.23:8000`. Open that on your phone
+while it's on the **same Wi-Fi** and the laptop is awake. Stop the queue with Ctrl+C.
+
+On the page, each clip has:
+- the video, the AI's reason and the transcript, and a ⚠ box with the reasons if it's a possible spoiler/cutscene
+- **Title** (saved as you type; it's used for posting later) and **Hook** (the text on screen for the first 2 s)
+- **Trim**: Start −2 s / +2 s and End −2 s / +2 s, and a **Layout** switch (facecam + gameplay / blurred
+  background / full-screen crop). Then press **Re-render**. It takes up to a minute and the new video appears by itself.
+- **Approve** / **Reject** / **Back to pending**. Approve only marks the clip approved; **nothing is posted anywhere**.
+  Approving a ⚠ clip asks you to confirm that you watched it fully.
+
+Re-importing (restarting the queue after rendering more clips) only adds new clips; your decisions and edits stay.
+
+**If the phone can't connect:**
+1. When Windows shows a firewall pop-up for Python, allow it on **Private networks**.
+2. Your home Wi-Fi must be set to **Private**: Windows Settings > Network & internet > Wi-Fi > (your network) >
+   Network profile type > Private. Only do this on a network you trust (your home), not school or café Wi-Fi.
+3. Phone and laptop must be on the same Wi-Fi (not the phone on mobile data).
+
+**Security:** there's no password in this stage. Anyone on the same Wi-Fi who knows the address can open the page
+and approve or reject clips (still nothing gets posted). Only run it on your home Wi-Fi. To use it away from home later,
+install Tailscale on the laptop and the phone and open `http://<laptop's Tailscale address>:8000`.
+Settings (port, trim step, min/max length) are in the `[queue]` section of `config.toml`.

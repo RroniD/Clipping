@@ -104,6 +104,13 @@ DEFAULTS: dict = {
         "loudness_lufs": -14,
         "duck_music_db": 0,
     },
+    "queue": {
+        "host": "0.0.0.0",
+        "port": 8000,
+        "trim_step": 2,
+        "min_seconds": 5,
+        "max_seconds": 90,
+    },
 }
 
 

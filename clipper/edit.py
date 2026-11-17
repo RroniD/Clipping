@@ -360,16 +360,8 @@ def render_vod(out_dir: Path, cfg: dict, top_n: int | None = None, only: list[in
     streamers = load_streamers()
     if streamer not in streamers:   # hard rule 3, checked again here
         raise SystemExit(f"Refusing to edit: {streamer} is not in streamers.toml.")
-    streamer_cfg = dict(streamers[streamer])
-    if layout_override:
-        streamer_cfg["layout"] = layout_override
-        if layout_override != "split":
-            # The gameplay box was measured for the split scene; other scenes use the full frame
-            # (or a centred 9:16 slice for "crop").
-            streamer_cfg.pop("gameplay", None)
-    layout = layout_for(streamer_cfg)
     e = cfg["edit"]
-    print(f"Layout for {streamer}: {layout.mode}")
+    print(f"Layout for {streamer}: {streamer_layout(streamers[streamer], layout_override).mode}")
 
     picked = []
     for d in data["candidates"]:
@@ -384,13 +376,67 @@ def render_vod(out_dir: Path, cfg: dict, top_n: int | None = None, only: list[in
     if not only:
         picked = picked[: top_n or e["top_n"]]
 
-    transcriber = None
+    renderer = ClipRenderer(cfg)
     finals = []
     for i, d in enumerate(picked, 1):
-        start, end = float(d["start"]), float(d["end"])
+        print(f"  [{i}/{len(picked)}] {clip_name(d)} ({float(d['end']) - float(d['start']):.0f} s)")
+        finals.append(renderer.render(out_dir, data, d, layout_mode=layout_override, captions=captions))
+    return finals
+
+
+def clip_name(d: dict) -> str:
+    """File name (no extension) of a candidate's finished clip, e.g. 03_WARN_1h02m03s."""
+    return f"{d['rank']:02d}_{'WARN_' if d.get('warning') else ''}{d['peak_time']}"
+
+
+def streamer_layout(streamer_cfg: dict, mode: str | None = None) -> Layout:
+    """The streamer's layout, or another layout mode for a clip from a different scene."""
+    streamer_cfg = dict(streamer_cfg)
+    if mode:
+        streamer_cfg["layout"] = mode
+        if mode != "split":
+            # The gameplay box was measured for the split scene; other scenes use the full frame
+            # (or a centred 9:16 slice for "crop").
+            streamer_cfg.pop("gameplay", None)
+    return layout_for(streamer_cfg)
+
+
+class ClipRenderer:
+    """Renders single clips. Used by `render` above and by the review queue (Stage 3) when
+    you trim a clip, change its hook or switch its layout.
+
+    It's a class only so the Whisper model is loaded once and reused for every clip.
+    """
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.transcriber = None
+
+    def _transcribe(self, source: Path, offset: float, duration: float) -> list[dict]:
+        if self.transcriber is None:
+            from clipper.transcribe import Transcriber
+            self.transcriber = Transcriber(self.cfg)
+        raw = self.transcriber.transcribe_window(source, offset, offset + duration)
+        return [{"start": w.start - offset, "end": w.end - offset, "text": w.text} for w in raw]
+
+    def render(self, out_dir: Path, data: dict, d: dict, start: float | None = None,
+               end: float | None = None, layout_mode: str | None = None, hook: str | None = None,
+               out_name: str | None = None, captions: bool = True) -> Path:
+        """Render candidate `d` of candidates.json `data` and return the finished .mp4.
+
+        start/end (VOD seconds), layout_mode and hook default to the candidate's own values.
+        A small .json next to the .ass file records what was used, so the review queue knows.
+        """
+        cfg, e = self.cfg, self.cfg["edit"]
+        streamer, platform, url = data["streamer"], data["platform"], data["url"]
+        streamers = load_streamers()
+        if streamer not in streamers:   # hard rule 3, checked again here
+            raise SystemExit(f"Refusing to edit: {streamer} is not in streamers.toml.")
+        layout = streamer_layout(streamers[streamer], layout_mode)
+        start = float(d["start"] if start is None else start)
+        end = float(d["end"] if end is None else end)
         duration = end - start
-        name = f"{d['rank']:02d}_{'WARN_' if d.get('warning') else ''}{d['peak_time']}"
-        print(f"  [{i}/{len(picked)}] {name} ({duration:.0f} s)")
+        name = out_name or clip_name(d)
 
         # 1. Download just this section at up to 1080p. A little padding on both sides
         #    so the cut in step 3 lands on exact frames.
@@ -401,16 +447,18 @@ def render_vod(out_dir: Path, cfg: dict, top_n: int | None = None, only: list[in
         offset = start - src_start
 
         # 2. Word timings: from run.py if it saved them, else transcribe this clip now.
-        words = _words_for(d, start, end) if captions else []
-        if words is None:
-            if transcriber is None:
-                from clipper.transcribe import Transcriber
-                transcriber = Transcriber(cfg)
-            raw = transcriber.transcribe_window(source, offset, offset + duration)
-            words = [{"start": w.start - offset, "end": w.end - offset, "text": w.text} for w in raw]
+        #    run.py only saved words inside the original clip, so a clip trimmed LONGER needs
+        #    a fresh transcription to get captions for the extra seconds.
+        words: list[dict] | None = []
+        if captions:
+            inside = start >= float(d["start"]) - 0.05 and end <= float(d["end"]) + 0.05
+            words = _words_for(d, start, end) if inside else None
+            if words is None:
+                words = self._transcribe(source, offset, duration)
 
         # 3. Subtitle file (captions + hook + credit), then one ffmpeg render.
-        hook = ((d.get("ai") or {}).get("hook") or "").strip() if e["hook"] else ""
+        if hook is None:
+            hook = ((d.get("ai") or {}).get("hook") or "").strip() if e["hook"] else ""
         credit = credit_text(streamer, platform) if e["credit"] else ""
         chunks = chunk_words(words, e["caption_max_words"], e["caption_max_chars"], e["caption_gap"])
         work = out_dir / "final" / "work"
@@ -420,8 +468,10 @@ def render_vod(out_dir: Path, cfg: dict, top_n: int | None = None, only: list[in
                             encoding="utf-8")
         final = render_clip(source, offset, duration, layout, ass_path, words,
                             out_dir / "final" / f"{name}.mp4", cfg)
-        finals.append(final)
-    return finals
+        (work / f"{name}.json").write_text(json.dumps(
+            {"rank": d["rank"], "start": start, "end": end, "layout": layout.mode, "hook": hook}),
+            encoding="utf-8")
+        return final
 
 
 # --------------------------------------------------------------------------- layout helper
