@@ -246,6 +246,7 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                  'hook_model': 'claude-sonnet-5-5',
                  'hook_top_n': 15,
                  'hook_frames': 4,
+                 'self_check': True,
                  'rank_weight': 0.3,
                  'signal_power': 0.5,
                  'ai_power': 2.0},

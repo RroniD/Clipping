@@ -106,6 +106,7 @@ EXTRA_COLUMNS = {
     "ai_json": "TEXT NOT NULL DEFAULT '{}'",
     "breakdown_json": "TEXT NOT NULL DEFAULT '{}'",
     "layout_reason": "TEXT NOT NULL DEFAULT ''",
+    "notes": "TEXT NOT NULL DEFAULT ''",
 }
 
 
@@ -179,7 +180,9 @@ def _clip_fields(d: dict, used: dict, video: str) -> dict:
             "campaign": used.get("campaign") or "", "explore": int(bool(d.get("explore"))),
             "peak_score": d.get("peak_score"), "ai_json": json.dumps(ai),
             "breakdown_json": json.dumps(d.get("breakdown", {})),
-            "layout_reason": used.get("layout_reason", d.get("layout_reason", ""))}
+            "layout_reason": used.get("layout_reason", d.get("layout_reason", "")),
+            # The self-check's notes on the finished clip ("captions cover the car", ...).
+            "notes": "; ".join((used.get("self_check") or {}).get("problems", []))}
 
 
 def import_clips(db: sqlite3.Connection, out_root: Path = OUT_ROOT) -> int:
@@ -765,6 +768,7 @@ function card(c) {
        ${left > 0 ? `Post + submit within ${left} min` : `Submit window passed ${-left} min ago`}</div>` : ""}
     <video controls playsinline preload="metadata" src="/video/${c.id}?v=${c.version}#t=0.1"></video>
     ${c.ai_reason ? `<div class="meta">AI: ${esc(c.ai_reason)}</div>` : ""}
+    ${c.notes ? `<div class="meta">🔎 Check of the finished clip: ${esc(c.notes)}</div>` : ""}
     ${c.transcript ? `<div class="meta">“${esc(c.transcript.slice(0, 220))}${c.transcript.length > 220 ? "…" : ""}”</div>` : ""}
     <label>Title (for posting later)</label>
     <input value="${esc(c.title)}" onchange="saveTitle(${c.id}, this.value)">

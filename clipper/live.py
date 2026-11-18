@@ -634,7 +634,7 @@ class ClipWorker(threading.Thread):
         # Transcribe the whole cut piece, snap the edges to sentences, clamp the length.
         if self.transcriber is None:
             self.transcriber = Transcriber(cfg)
-            self.renderer = ClipRenderer(cfg)
+            self.renderer = ClipRenderer(cfg, self.judge)   # judge = self-check of finished clips
             # ONE Whisper model for both: loading it twice costs ~30 s and twice the GPU memory
             # (an 8 GB RTX 4060 can't spare that while a game or stream is running).
             self.renderer.transcriber = self.transcriber

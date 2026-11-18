@@ -157,6 +157,7 @@ hook_model = "claude-sonnet-5-5"  # smarter model that rewrites hooks/titles/cap
                               # (~$0.005 per clip). "" = off, Haiku's hooks are used.
 hook_top_n = 15               # how many kept clips get the smarter hooks
 hook_frames = 4               # frames it sees (fewer than the first judge, to keep it cheap)
+self_check = true             # the first judge looks at each FINISHED clip (~$0.0005) and fixes a wrong layout
 rank_weight = 0.3             # how much the side-by-side ranking counts vs. each clip's own score
 signal_power = 0.5            # final score = signal^0.5 x AI^2: once a moment passed the detector,
 ai_power = 2.0                # how GOOD it is matters more than how loud chat was

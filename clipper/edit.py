@@ -713,7 +713,15 @@ def render_vod(out_dir: Path, cfg: dict, top_n: int | None = None, only: list[in
     if not only:
         picked = picked[: top_n or e["top_n"]]
 
-    renderer = ClipRenderer(cfg)
+    judge = None
+    if cfg["judge"]["enabled"] and cfg["judge"]["self_check"]:
+        from dotenv import load_dotenv
+        load_dotenv(PROJECT_ROOT / ".env")
+        import os
+        if os.getenv("ANTHROPIC_API_KEY"):
+            from clipper.judge import Judge
+            judge = Judge(cfg)
+    renderer = ClipRenderer(cfg, judge)
     finals = []
     for i, d in enumerate(picked, 1):
         print(f"  [{i}/{len(picked)}] {clip_name(d)} ({float(d['end']) - float(d['start']):.0f} s)")
@@ -766,9 +774,10 @@ class ClipRenderer:
     It's a class only so the Whisper model is loaded once and reused for every clip.
     """
 
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, judge=None):
         self.cfg = cfg
         self.transcriber = None
+        self.judge = judge   # for the self-check of finished clips (None = no check)
 
     def _transcribe(self, source: Path, offset: float, duration: float) -> list[dict]:
         if self.transcriber is None:
@@ -781,7 +790,7 @@ class ClipRenderer:
                end: float | None = None, layout_mode: str | None = None, hook: str | None = None,
                out_name: str | None = None, captions: bool = True,
                source: Path | None = None, source_start: float = 0.0, banner: str | None = None,
-               campaign: str | None = None, safe_overlay: bool = False) -> Path:
+               campaign: str | None = None, safe_overlay: bool = False, _retry: bool = False) -> Path:
         """Render candidate `d` of candidates.json `data` and return the finished .mp4.
 
         start/end (VOD seconds), layout_mode, hook and banner (context line) default to the
@@ -904,12 +913,26 @@ class ClipRenderer:
                             safe_overlay=safe_overlay, track=track)
         if e["cover"]:
             save_cover(final, zoom_at if zoom_at is not None else min(1.0, edited / 2), final.with_suffix(".jpg"))
+
+        # 6. Self-check: the AI looks at the finished vertical clip. If the layout is clearly
+        #    wrong (face cut off, chat on top) and you didn't choose it by hand, re-render once
+        #    with its suggestion. The cut itself is never changed.
+        check = None
+        if self.judge is not None and cfg["judge"]["self_check"]:
+            from clipper.selfcheck import check as self_check
+            check = self_check(self.judge, final, edited, zoom_at, layout.mode, hook, banner)
+            if check and check["fix_layout"] != "none" and not layout_mode and not _retry:
+                return self.render(out_dir, data, {**d, "layout": check["fix_layout"],
+                                                   "layout_reason": "self-check: " + "; ".join(check["problems"][:2])},
+                                   start, end, None, hook, out_name, captions, source, source_start, banner,
+                                   campaign, safe_overlay, _retry=True)
         (work / f"{name}.json").write_text(json.dumps(
             {"rank": d["rank"], "start": start, "end": end, "layout": layout.mode,
              "layout_reason": layout_reason, "hook": hook,
              "banner": banner, "campaign": campaign, "duration": round(edited, 2),
              "cuts": len(segments) - 1 - (1 if lead_in else 0),
-             "warnings": [music_warning] if music_warning else []}),
+             "warnings": [music_warning] if music_warning else [],
+             "self_check": check}),
             encoding="utf-8")
         return final
 
