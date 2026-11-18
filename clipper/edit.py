@@ -114,13 +114,16 @@ def video_filter(layout: Layout, cfg: dict, inp: str = "[0:v]") -> str:
                 f"[top][bot]vstack=inputs=2,fps={fps}[base]")
     if layout.mode == "crop":
         return f"{inp}{_crop(layout.gameplay)},{_fill(OUT_W, OUT_H)},setsar=1,fps={fps}[base]"
-    # no_facecam: the gameplay fits the width in the middle; above and below is a blurred,
-    # darker, zoomed-in copy of the same picture. The blur is done on a small copy (270x480)
-    # and scaled back up because blurring at full size is slow and looks the same.
+    # no_facecam: the gameplay in the middle; above and below is a blurred, darker, zoomed-in
+    # copy of the same picture. The blur is done on a small copy (270x480) and scaled back up
+    # because blurring at full size is slow and looks the same.
+    # no_facecam_zoom (1.3): the game is scaled 30% wider than the screen and its sides are
+    # trimmed, so it's big enough to see on a phone (the action is almost always in the middle).
     blur = cfg["edit"]["blur_strength"]
+    zw = int(round(OUT_W * float(cfg["edit"]["no_facecam_zoom"]) / 2) * 2)
     return (f"{inp}{_crop(layout.gameplay)},split=2[a][b];"
             f"[a]{_fill(270, 480)},boxblur={blur}:2,scale={OUT_W}:{OUT_H},eq=brightness=-0.12[bg];"
-            f"[b]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease[fg];"
+            f"[b]scale={zw}:{OUT_H}:force_original_aspect_ratio=decrease,crop='min(iw,{OUT_W})':ih[fg];"
             f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,fps={fps}[base]")
 
 
@@ -735,7 +738,7 @@ class ClipRenderer:
         words: list[dict] | None = []
         if captions:
             lo, hi = d.get("words_range") or (float(d["start"]), float(d["end"]))
-            inside = start >= float(lo) - 0.05 and end <= float(hi) + 0.05
+            inside = start >= float(lo) - 0.5 and end <= float(hi) + 0.5   # snapping can nudge 0.1-0.3 s
             words = _words_for(d, start, end) if inside else None
             if words is None:
                 words = self._transcribe(source, offset, duration)

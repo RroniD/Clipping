@@ -164,6 +164,7 @@ preset = "veryfast"        # x264 speed/size trade-off
 crf = 20                   # x264 quality: lower = better and bigger (18-23 is sensible)
 facecam_share = 0.35       # "split" layout: facecam takes the top 35% of the screen
 blur_strength = 10         # "no_facecam" layout: blur of the background fill
+no_facecam_zoom = 1.3      # "no_facecam" layout: game 30% bigger, sides trimmed (1.0 = whole width, small)
 font = "Arial Black"       # any font installed on Windows, by name
 caption_size = 84
 caption_max_words = 3      # 2-4 words on screen at a time

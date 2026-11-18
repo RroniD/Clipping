@@ -130,7 +130,9 @@ fullscreen gameplay without a visible webcam, or the webcam spot shows chat or s
 
 hook_options: 3 DIFFERENT hooks (at most 8 words each) of on-screen text for the first 2 seconds, \
 using different angles: a question ("Why did he do THAT?"), the stakes ("5 stars and no car left"), \
-a reaction ("Chat told him not to..."). Then hook = the one most likely to stop the scroll. No \
+a reaction ("Chat told him not to..."). Then hook = the one most likely to stop the scroll. \
+NEVER give away the payoff in the hook: "He's about to win" or "Watch the last fight" makes people \
+stay; "He won his first game" tells them they can swipe. Short beats long (3-6 words is best). No \
 generic hooks like "insane moment", no lies, no spoilers.
 
 punch_words: 1-2 single words that are SAID in the transcript and carry the moment ("WASTED", \

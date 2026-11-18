@@ -635,6 +635,9 @@ class ClipWorker(threading.Thread):
         if self.transcriber is None:
             self.transcriber = Transcriber(cfg)
             self.renderer = ClipRenderer(cfg)
+            # ONE Whisper model for both: loading it twice costs ~30 s and twice the GPU memory
+            # (an 8 GB RTX 4060 can't spare that while a game or stream is running).
+            self.renderer.transcriber = self.transcriber
         duration = job.source_end - job.source_start
         raw = self.transcriber.transcribe_window(job.source, 0.0, duration)
         for w in raw:   # file seconds -> stream seconds

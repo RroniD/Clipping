@@ -249,6 +249,7 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                 'crf': 20,
                 'facecam_share': 0.35,
                 'blur_strength': 10,
+                'no_facecam_zoom': 1.3,
                 'font': 'Arial Black',
                 'caption_size': 84,
                 'caption_max_words': 3,
