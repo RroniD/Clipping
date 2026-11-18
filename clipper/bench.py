@@ -230,68 +230,215 @@ def judge_vs_views(folder: Path, cfg: dict) -> tuple[float, int] | None:
     return spearman(quality, clippers), len(judged)
 
 
+# --------------------------------------------------------------------------- learned scorer
+
+# Fixed split by VOD, so every run compares on the same unseen VODs. The first 3 held-out VODs
+# are the ones the hand weights were never tuned on; newer downloads are split alternately.
+HELD_OUT = ("2913223522", "2921253522", "2928036561", "2920442556", "2916135200", "2911712860")
+
+# Model settings tried (picked by cross-validation on the TRAINING VODs only).
+GRID = [("logistic", {"C": 0.01}),
+        ("boost", {"iters": 100, "leaves": 7, "min_leaf": 500}),
+        ("boost", {"iters": 200, "leaves": 15, "min_leaf": 200}),
+        ("boost", {"iters": 300, "leaves": 7, "min_leaf": 1000, "lr": 0.03})]
+
+
+def learned_objective(rows: list[dict]) -> float:
+    """Average of top-15 / top-40 hits, by both hit rules (within 20 s; inside the viewers' clip)."""
+    s = summary(rows)
+    return (s["recall15"] + s["recall40"] + s["inside15"] + s["inside40"]) / 4
+
+
+def fit_learned(train: list[VodData], kind: str, params: dict):
+    from clipper import learned
+    X = np.vstack([v.features()[0] for v in train])
+    ys, ws = zip(*[learned.labels(v.n, v.train_moments) for v in train])
+    y, w = np.concatenate(ys), np.concatenate(ws)
+    keep = w > 0
+    model = learned.make_model(kind, **params)
+    if kind == "logistic":
+        model.fit(X[keep], y[keep], logisticregression__sample_weight=w[keep])
+    else:
+        model.fit(X[keep], y[keep], sample_weight=w[keep])
+    return model
+
+
+def learned_score(model, vod: VodData, cfg: dict) -> np.ndarray:
+    from clipper import learned
+    s = cfg["scoring"]
+    return float(s["learned_scale"]) * learned.predict(model, vod.features()[0], int(s["smooth_seconds"]))
+
+
+def choose_learned(train: list[VodData], cfg: dict, log=print) -> tuple[str, dict, float]:
+    """Leave-one-VOD-out on the training VODs: train on all but one, score that one."""
+    best = None
+    for kind, params in GRID:
+        rows = []
+        for i, v in enumerate(train):
+            m = fit_learned(train[:i] + train[i + 1:], kind, params)
+            rows.append(evaluate(v, cfg, 0, learned_score(m, v, cfg)))
+        o = learned_objective(rows)
+        log(f"  cross-validation {kind} {params}: {o:.3f}")
+        if best is None or o > best[2]:
+            best = (kind, params, o)
+    return best
+
+
+def save_model(model, kind: str, params: dict, train: list[VodData], names: list[str]) -> None:
+    import joblib
+    import sklearn
+    from clipper import learned
+    learned.MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump({"model": model, "features": names, "kind": kind, "params": params,
+                 "trained_on": [v.id for v in train], "sklearn": sklearn.__version__}, learned.MODEL_PATH)
+    learned._cache.clear()
+
+
+def set_scorer(name: str) -> None:
+    import re
+    path = PROJECT_ROOT / "config.toml"
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(r'(?m)^(scorer\s*=\s*)"[a-z]+"', lambda m: f'{m.group(1)}"{name}"', text, count=1)
+    path.write_text(text, encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- error analysis
+
+def _hms(t: float) -> str:
+    t = int(t)
+    return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}"
+
+
+def error_analysis(test: list[VodData], scores: dict[str, np.ndarray], cfg: dict, n: int = 10) -> list[str]:
+    """The biggest misses (moments many viewers clipped that we didn't pick in the top 40) and
+    the worst false picks (our top 15 where no viewer clipped anything within 20 s)."""
+    misses, falses = [], []
+    for v in test:
+        r = evaluate(v, cfg, 0, scores[v.id])
+        peaks, score, z = r["peaks"], scores[v.id], v.z_by_lag[0]
+        for m in v.truth:
+            a, b = m.get("span", (m["start"], m["end"]))
+            if any(abs(p - m["t"]) <= HIT_SECONDS or a - 5 <= p <= b + 5 for p in peaks[:40]):
+                continue
+            lo, hi = max(0, int(a) - 10), min(v.n, int(b) + 10)
+            best = lo + int(np.argmax(score[lo:hi]))
+            rank = 1 + sum(1 for p in peaks if score[p] > score[best])
+            zmax = max(("chat", "unique", "hype", "audio", "spam"), key=lambda k: z[k][lo:hi].max())
+            misses.append((m["clippers"], v.id, _hms(m["t"]), rank, float(z[zmax][lo:hi].max()), zmax))
+        for p in peaks[:15]:
+            near = min((abs(p - t) for t in v.all_clip_times), default=9999)
+            if near > HIT_SECONDS:
+                falses.append((float(score[p]), v.id, _hms(p), int(near),
+                               {k: round(float(z[k][p]), 1) for k in ("unique", "hype", "spam", "audio")}))
+    lines = [f"Biggest misses on the held-out VODs (viewers clipped it, not in our top 40):",
+             "  clippers  VOD          time      would rank   strongest signal there"]
+    for c, vid, t, rank, zv, k in sorted(misses, key=lambda m: -m[0])[:n]:
+        lines.append(f"  {c:>8}  {vid}  {t:>8}   #{rank:<10}  {k} z={zv:.1f}")
+    lines += ["", "Worst false picks (our top 15, no viewer clip within 20 s):",
+              "  score  VOD          time      nearest viewer clip   z at the pick"]
+    for s, vid, t, near, zs in sorted(falses, key=lambda f: -f[0])[:n]:
+        lines.append(f"  {s:5.1f}  {vid}  {t:>8}   {near:>5} s away          {zs}")
+    return lines
+
+
 # --------------------------------------------------------------------------- report
 
-def run(streamer: str = "ishowspeed", apply: bool = True) -> str:
+def run(streamer: str = "ishowspeed", apply: bool = True, log=print) -> str:
     cfg = load_config()
     folders = sorted(p for p in (OUT / streamer).iterdir()
                      if (p / "chat.json").exists() and (p / "viewer_clips.json").exists()
                      and any(p.glob("audio.*")))
     vods = []
     for f in folders:
-        print(f"loading {f.name} ...", flush=True)
+        log(f"loading {f.name} ...")
         v = VodData(f, cfg)
         if len(v.truth) >= 10:
             vods.append(v)
-    if len(vods) < 2:
-        raise SystemExit("Need at least 2 VODs with viewer clips: python -m clipper.bench prepare <ids>")
+        else:
+            log(f"  skipped: only {len(v.truth)} moments that several viewers clipped")
+    test = [v for v in vods if v.id in HELD_OUT]
+    train = [v for v in vods if v.id not in HELD_OUT]
+    if len(train) < 2 or not test:
+        raise SystemExit("Need VODs with viewer clips: python -m clipper.bench prepare <ids>")
     lag0 = int(cfg["chat"]["lag_seconds"]) if int(cfg["chat"]["lag_seconds"]) in vods[0].z_by_lag else 6
-    before = [evaluate(v, cfg, lag0) for v in vods]
-    half = len(vods) // 2
-    train, test = vods[:half], vods[half:]
-    w, lag, train_score = tune(train, cfg)
-    tuned_cfg = {**cfg, "weights": {**cfg["weights"], **w}}
-    test_before = objective([evaluate(v, cfg, lag0) for v in test])
-    test_after = objective([evaluate(v, tuned_cfg, lag) for v in test])
-    after = [evaluate(v, tuned_cfg, lag) for v in vods]
-    improved = test_after > test_before + 0.01
+    hand_cfg = {**cfg, "scoring": {**cfg["scoring"], "scorer": "hand"}}
+
+    # 1. The current hand weights.
+    hand_test = [evaluate(v, hand_cfg, lag0) for v in test]
+    # 2. Hand weights re-tuned on the (now bigger) training set.
+    log("re-tuning the hand weights on the training VODs ...")
+    w, lag, _ = tune(train, hand_cfg)
+    retuned_cfg = {**hand_cfg, "weights": {**hand_cfg["weights"], **w}}
+    retuned_test = [evaluate(v, retuned_cfg, lag) for v in test]
+    hand_better = objective(retuned_test) > objective(hand_test) + 0.01
+    best_hand = retuned_test if hand_better else hand_test
+    # 3. The learned scorer: settings chosen on the training VODs, then checked once on held-out.
+    log("choosing the learned model (cross-validation on the training VODs) ...")
+    kind, params, cv = choose_learned(train, hand_cfg, log)
+    model = fit_learned(train, kind, params)
+    scores = {v.id: learned_score(model, v, hand_cfg) for v in test}
+    learned_test = [evaluate(v, hand_cfg, 0, scores[v.id]) for v in test]
+    sh, sl = summary(best_hand), summary(learned_test)
+    learned_wins = sl["recall15"] > sh["recall15"] and sl["recall40"] > sh["recall40"]
+
+    def line(name, rows):
+        s = summary(rows)
+        return (f"{name:<28} {s['recall15']:>6.0%} {s['recall40']:>6.0%}   {s['loose15']:>6.0%} {s['loose40']:>6.0%}"
+                f"   {s['inside15']:>6.0%} {s['inside40']:>6.0%}")
 
     lines = ["AUTOCLIPPER BENCHMARK", "=====================", "",
-             f"Answer key: up to 20 moments per VOD that 3+ different Twitch viewers clipped (most-clipped first) ({len(vods)} VODs of {streamer}).",
-             "The detector does NOT see the viewer clips. A 'hit' = our moment within 20 s of theirs.", "",
-             "VOD          top-15 hits  top-40 hits  clippers covered by top 15   start/end error   our top-15 nobody clipped"]
-
-    def row(r):
-        se = "-" if r["start_err"] is None else f"{r['start_err']:+.0f}s/{r['end_err']:+.0f}s"
-        return (f"{r['vod']:<12} {r['recall15']:>10.0%} {r['recall40']:>12.0%} {r['views15']:>20.0%}   "
-                f"{se:>16}   {r['unclipped15']:>6}")
-    lines += ["BEFORE tuning (current settings):"] + [row(r) for r in before]
-    s0 = summary(before)
-    lines += [f"AVERAGE      {s0['recall15']:>10.0%} {s0['recall40']:>12.0%} {s0['views15']:>20.0%}", ""]
-    lines += [f"Tuning on {', '.join(v.id for v in train)}; checking on {', '.join(v.id for v in test)} "
-              "(VODs the tuning never saw)."]
-    lines += [f"Best settings found: weights {w}, chat lag {lag} s",
-              f"Held-out score: before {test_before:.3f} -> after {test_after:.3f} "
-              f"({'better: settings applied to config.toml' if improved and apply else 'not better enough: config.toml unchanged'})", ""]
-    lines += ["AFTER tuning:"] + [row(r) for r in after]
-    s1 = summary(after)
-    lines += [f"AVERAGE      {s1['recall15']:>10.0%} {s1['recall40']:>12.0%} {s1['views15']:>20.0%}", ""]
+             f"{len(vods)} VODs of {streamer}. Answer key per VOD: up to 20 moments that 3+ different Twitch",
+             "viewers clipped. The detector does NOT see the viewer clips (like live mode before anyone clips).",
+             f"Training VODs ({len(train)}): {', '.join(v.id for v in train)}",
+             f"Held-out VODs ({len(test)}, never used for tuning or training): {', '.join(v.id for v in test)}", "",
+             "Share of the viewers' moments found in our top 15 / top 40, on the HELD-OUT VODs:",
+             "Hit rule:                     within 20 s     within 30 s     inside the viewers' clip",
+             "                              top15  top40    top15  top40    top15  top40",
+             line("hand weights (current)", hand_test),
+             line(f"hand weights re-tuned", retuned_test),
+             line(f"learned scorer ({kind})", learned_test), ""]
+    lines += [f"Learned model: {kind} {params}, picked by cross-validation on the training VODs (score {cv:.3f}).",
+              ("RESULT: the learned scorer beats the best hand weights on BOTH top-15 and top-40 "
+               "-> it is now the default (config.toml [scoring] scorer = \"learned\")." if learned_wins else
+               "RESULT: the learned scorer did not beat the hand weights on both top-15 and top-40 -> hand weights stay."),
+              (f"Re-tuned hand weights {w}, lag {lag} s: better on held-out -> written to config.toml."
+               if hand_better and apply else "Re-tuned hand weights were not better on held-out -> config.toml weights unchanged."),
+              ""]
+    lines += ["Per held-out VOD (within 20 s, top 15 / top 40):"]
+    for h, l in zip(best_hand, learned_test):
+        lines.append(f"  {h['vod']}  hand {h['recall15']:>4.0%} / {h['recall40']:>4.0%}    learned "
+                     f"{l['recall15']:>4.0%} / {l['recall40']:>4.0%}   ({h['n_truth']} moments)")
+    lines.append("")
+    final_scores = scores if learned_wins else {
+        v.id: combine(v.z_by_lag[lag if hand_better else lag0], retuned_cfg if hand_better else hand_cfg) for v in test}
+    lines += error_analysis(test, final_scores, hand_cfg)
+    lines.append("")
     for f in folders:
         jv = judge_vs_views(f, cfg)
         if jv:
-            lines.append(f"AI judge vs number of viewers who clipped the moment, on {f.name}: Spearman {jv[0]:+.2f} over {jv[1]} judged moments "
-                         "(+1 = the AI ranks moments exactly like viewers' views; 0 = unrelated).")
-    lines += ["", "How to read this: 'top-15 hits' is the share of the 20 most-clipped moments that are in our 15 picks.",
-              "Human clippers usually post 3-15 clips per stream, so top-15 is the number that matters most.",
-              "'Nobody clipped' picks aren't necessarily wrong: viewers can't clip everything."]
+            lines.append(f"AI judge vs number of viewers who clipped the moment, on {f.name}: Spearman {jv[0]:+.2f} "
+                         f"over {jv[1]} judged moments.")
+    lines += ["", "How to read this: 'top-15' is the share of the most-clipped moments that are in our 15 picks.",
+              "'within 30 s' vs 'within 20 s' shows how many misses are only a timing difference.",
+              "'inside the viewers' clip' = our moment lies inside what they actually cut (fairest rule:",
+              "the answer key's single time is a guess at 60% into their clips).",
+              "Picks nobody clipped aren't necessarily wrong: viewers can't clip everything."]
     report = "\n".join(lines)
     BENCH.mkdir(parents=True, exist_ok=True)
     (BENCH / "REPORT.txt").write_text(report + "\n", encoding="utf-8")
-    (BENCH / "results.json").write_text(json.dumps({"before": before, "after": after, "weights": w, "lag": lag,
-                                                    "test_before": test_before, "test_after": test_after,
-                                                    "applied": bool(improved and apply)}, indent=1), encoding="utf-8")
-    if improved and apply:
-        apply_settings(w, lag)
+    strip = lambda rows: [{k: v for k, v in r.items() if k != "peaks"} for r in rows]
+    (BENCH / "results.json").write_text(json.dumps({
+        "hand": strip(hand_test), "retuned": strip(retuned_test), "learned": strip(learned_test),
+        "weights": w, "lag": lag, "model": [kind, params], "learned_default": bool(learned_wins and apply),
+        "train": [v.id for v in train], "test": [v.id for v in test]}, indent=1), encoding="utf-8")
+    if apply:
+        if hand_better:
+            apply_settings(w, lag)
+        if learned_wins:
+            # The shipped model is trained on ALL VODs (held-out included): more data, same settings.
+            final = fit_learned(train + test, kind, params)
+            save_model(final, kind, params, train + test, vods[0].features()[1])
+            set_scorer("learned")
     return report
 
 
