@@ -254,5 +254,6 @@ buffer_format = "best[height<=1080]/best"
 x264_threads = 6           # CPU threads for rendering clips (fewer = smoother game/stream alongside)
 x264_preset = "superfast"  # faster than "veryfast", slightly bigger files; live clips reach you sooner
 whisper_model = ""         # e.g. "small" to use less GPU while gaming; "" = same as [whisper]
-min_quality = 4.5          # AI quality below this (1-10): saved for learning, but not edited into a clip
+min_quality = 4.0          # AI quality below this (1-10): saved for learning, but not edited into a clip
+                           # (was 4.5: on Lacy's GTA marathon only 1 in 5 moments passed; you filter in the queue)
 music_removal = false      # music removal takes ~40-70 s per clip on this laptop: off live, to stay fast

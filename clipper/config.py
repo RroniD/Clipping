@@ -328,7 +328,7 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                 'x264_threads': 6,
                 'x264_preset': 'superfast',
                 'whisper_model': '',
-                'min_quality': 4.5,
+                'min_quality': 4.0,
                 'music_removal': False}}
 
 
