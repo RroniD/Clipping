@@ -137,6 +137,20 @@ def predict(model, X: np.ndarray, smooth_seconds: int = 3) -> np.ndarray:
     return _mean(p, smooth_seconds)
 
 
+def to_score(p: np.ndarray, scale: float = 2.0) -> np.ndarray:
+    """Model probability -> a spike score on the hand formula's scale.
+
+    Why: the model is trained with "balanced" classes, so its raw output sits around 0.6 almost
+    everywhere. Used directly, every second would pass the peak threshold (live mode would clip
+    non-stop) and the clip-end rule ("score fell to 35% of the peak") would never fire.
+    So we measure how far each second's log-odds stand above this stream's typical level:
+    0 = an ordinary second, 2 = odds e (~2.7x) higher than usual, 6 = ~20x.
+    """
+    p = np.clip(p, 1e-4, 1 - 1e-4)
+    logit = np.log(p / (1 - p))
+    return np.clip(scale * (logit - np.median(logit)), 0, None)
+
+
 # --------------------------------------------------------------------------- use in the pipeline
 
 _cache: dict = {}
@@ -158,7 +172,7 @@ def load(path: Path = MODEL_PATH):
 
 
 def score(raw: dict[str, np.ndarray], cfg: dict) -> np.ndarray | None:
-    """Per-second score from the saved model, on the same scale as the hand formula (0-10).
+    """Per-second score from the saved model, on the same scale as the hand formula.
     None = no model or no chat (e.g. a Kick VOD without recorded chat): use the hand formula."""
     saved = load()
     if saved is None or "chat" not in raw or "audio" not in raw:
@@ -168,4 +182,4 @@ def score(raw: dict[str, np.ndarray], cfg: dict) -> np.ndarray | None:
         print("    (learned scorer was trained on other features: retrain with python -m clipper.bench learn)")
         return None
     s = cfg["scoring"]
-    return float(s.get("learned_scale", 10.0)) * predict(saved["model"], X, int(s["smooth_seconds"]))
+    return to_score(predict(saved["model"], X, int(s["smooth_seconds"])), float(s.get("learned_scale", 2.0)))

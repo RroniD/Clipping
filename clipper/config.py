@@ -179,7 +179,7 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                    'scream': 0.8,
                    'facecam_reaction': 0.8},
     'scoring': {   'scorer': 'hand',
-                   'learned_scale': 10,
+                   'learned_scale': 2,
                    'z_cap': 8,
                    'both_bonus': 0.5,
                    'smooth_seconds': 3},

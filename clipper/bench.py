@@ -266,7 +266,8 @@ def fit_learned(train: list[VodData], kind: str, params: dict):
 def learned_score(model, vod: VodData, cfg: dict) -> np.ndarray:
     from clipper import learned
     s = cfg["scoring"]
-    return float(s["learned_scale"]) * learned.predict(model, vod.features()[0], int(s["smooth_seconds"]))
+    return learned.to_score(learned.predict(model, vod.features()[0], int(s["smooth_seconds"])),
+                            float(s["learned_scale"]))
 
 
 def choose_learned(train: list[VodData], cfg: dict, log=print) -> tuple[str, dict, float]:

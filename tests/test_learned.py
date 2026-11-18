@@ -53,6 +53,17 @@ def test_model_trained_on_synthetic_chat_finds_new_moments():
     assert all(any(abs(p - m) <= 25 for p in peaks) for m in (250, 1000, 1600))
 
 
+def test_score_scale_is_zero_for_ordinary_seconds():
+    """A model that says 0.6 almost everywhere must not look like one giant peak."""
+    p = np.full(1000, 0.6)
+    p[500:510] = 0.97
+    s = learned.to_score(p)
+    assert s[100] == 0 and s[505] > 2.0
+    assert len(scoring.pick_peaks(s, 2.0, 45, 10)) == 1
+    start, end = scoring.rough_bounds(s, 505, spec_config()["clip"])
+    assert end - start < 40                 # the clip ends when the spike is over
+
+
 def test_hand_formula_is_used_without_a_saved_model(monkeypatch):
     cfg = spec_config()
     cfg["scoring"]["scorer"] = "learned"
