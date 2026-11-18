@@ -62,5 +62,6 @@ WHEN SOMETHING BREAKS
 
 
 COSTS
-  The AI judge costs about 1-5 cents per stream (Haiku). Everything else is free.
+  The AI costs about 10-15 cents per VOD (Haiku picks the moments, Sonnet writes the hooks for
+  the clips that get made). Live mode: about 1 cent per clip. Everything else is free.
   Set a monthly limit at platform.claude.com > Billing so it can never surprise you.
