@@ -639,6 +639,20 @@ class ClipWorker(threading.Thread):
             # (an 8 GB RTX 4060 can't spare that while a game or stream is running).
             self.renderer.transcriber = self.transcriber
         duration = job.source_end - job.source_start
+        j = cfg["judge"]
+
+        # While Whisper transcribes (GPU), look at the frames (CPU) at the same time.
+        def look():
+            ws = max(job.source_start, c.start - j["window_before"])
+            we = min(job.source_end, c.end + j["window_after"])
+            gray = framecheck.gray_frames(job.source, c.start - job.source_start, c.end - job.source_start)
+            reasons = framecheck.framecheck_reasons(framecheck.frame_stats(gray, cfg, None), None, cfg)
+            pics = extract_frames(job.source, job.source_start, frame_times(ws, we, c.peak, j["frames"]),
+                                  j["frame_width"])
+            return reasons, pics
+        from concurrent.futures import ThreadPoolExecutor
+        pool = ThreadPoolExecutor(max_workers=2)
+        looking = pool.submit(look)
         raw = self.transcriber.transcribe_window(job.source, 0.0, duration)
         for w in raw:   # file seconds -> stream seconds
             w.start += job.source_start
@@ -653,7 +667,6 @@ class ClipWorker(threading.Thread):
         data = (json.loads(cands_path.read_text(encoding="utf-8")) if cands_path.exists() else
                 {"url": s.url, "platform": s.platform, "vod_id": s.vod_id, "streamer": s.name,
                  "live": True, "signals": [], "candidates": []})
-        j = cfg["judge"]
         d = c.to_dict()
         d.update({"rank": len(data["candidates"]) + 1, "peak_time": hms(c.peak),
                   "window_start": round(max(job.source_start, c.start - j["window_before"]), 2),
@@ -662,15 +675,10 @@ class ClipWorker(threading.Thread):
                   "language": self.transcriber.last_language,
                   "extra_warnings": [s.launch_warning] if s.launch_warning else []})
 
-        # Local frame check + frames for the AI, both straight from our own recording.
+        # Local frame check + frames for the AI (computed above, while Whisper ran).
         frames = []
         try:
-            gray = framecheck.gray_frames(job.source, c.start - job.source_start, c.end - job.source_start)
-            stats = framecheck.frame_stats(gray, cfg, None)
-            d["framecheck_reasons"] = framecheck.framecheck_reasons(stats, None, cfg)
-            frames = extract_frames(job.source, job.source_start,
-                                    frame_times(d["window_start"], d["window_end"], c.peak, j["frames"]),
-                                    j["frame_width"])
+            d["framecheck_reasons"], frames = looking.result()
         except Exception as exc:
             log(s.name, f"couldn't look at the frames ({exc})")
 
@@ -680,13 +688,14 @@ class ClipWorker(threading.Thread):
                   frames_per_candidate=[frames], vod_length=job.source_end)
         d["start_time"] = hms(d["start"])
         d["transcript"] = words_between(raw, d["start"], d["end"])
-        if cfg["layout"]["auto"]:   # split / no_facecam / crop for THIS moment's scene
+        layout_job = None
+        if cfg["layout"]["auto"]:   # split / no_facecam / crop for THIS moment's scene (in parallel)
             from clipper.edit import layout_for
             from clipper.layoutcheck import choose_layout
             from clipper.config import load_streamers
             streamer_cfg = load_streamers().get(s.name, {})
-            choose_layout(d, job.source, job.source_start,
-                          layout_for(streamer_cfg).facecam if streamer_cfg.get("facecam") else None, cfg)
+            layout_job = pool.submit(choose_layout, d, job.source, job.source_start,
+                                     layout_for(streamer_cfg).facecam if streamer_cfg.get("facecam") else None, cfg)
         d["words"] = [[round(w.start, 2), round(w.end, 2), w.text]
                       for w in raw if w.end > d["window_start"] and w.start < d["window_end"]]
         d["words_range"] = [d["window_start"], d["window_end"]]
@@ -697,6 +706,9 @@ class ClipWorker(threading.Thread):
             from clipper.judge import polish_kept   # smarter hooks/titles for the clip we'll make
             polish_kept([d], {id(d): (raw, frames)}, cfg, s.name, self.judge,
                         log=lambda text: log(s.name, text.strip()))
+        if layout_job is not None:
+            layout_job.result()
+        pool.shutdown(wait=False)
         data["candidates"].append(d)
         cands_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         if not d["kept"]:
@@ -744,6 +756,8 @@ def live_cfg(cfg: dict) -> dict:
     running on the same laptop doesn't stutter while a clip renders."""
     cfg = json.loads(json.dumps(cfg))   # deep copy
     cfg["edit"]["threads"] = cfg["live"]["x264_threads"]
+    cfg["edit"]["preset"] = cfg["live"]["x264_preset"]     # faster encoding: clips in the queue sooner
+    cfg["edit"]["encoder"] = "auto"                        # use the graphics card's encoder if it works
     if not cfg["live"]["music_removal"]:
         cfg["audio"]["music_removal"] = "off"   # speed first in live mode (adds ~1 min per clip)
     if cfg["live"].get("whisper_model"):

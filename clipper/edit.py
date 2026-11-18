@@ -559,13 +559,26 @@ def render_clip(source: Path, offset: float, duration: float, layout: Layout, as
            "-i", str(source.resolve())]
     if audio_file:
         cmd += ["-i", str(audio_file.resolve())]
-    cmd += ["-filter_complex", ";".join(parts), "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-preset", e["preset"], "-crf", str(e["crf"]), "-pix_fmt", "yuv420p",
+    head = cmd + ["-filter_complex", ";".join(parts), "-map", "[vout]", "-map", "[aout]", "-pix_fmt", "yuv420p"]
+    tail = ["-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out_path.resolve())]
+    x264 = ["-c:v", "libx264", "-preset", e["preset"], "-crf", str(e["crf"]),
             # 0 = use every CPU core. Live mode sets fewer so a game/stream on the laptop stays smooth.
-            "-threads", str(e.get("threads", 0)),
-            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out_path.resolve())]
-    fetch.run(cmd, cwd=str(ass_path.parent))
+            "-threads", str(e.get("threads", 0))]
+    if e.get("encoder", "x264") == "auto" and _NVENC_OK.get("ok", True):
+        # The graphics card's own video encoder (NVENC): several times faster than x264 and it
+        # leaves the CPU free. Needs an up-to-date NVIDIA driver; if it fails we remember that
+        # and use x264 from then on.
+        nvenc = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", str(int(e["crf"]) + 1), "-b:v", "0"]
+        try:
+            fetch.run(head + nvenc + tail, cwd=str(ass_path.parent))
+            return out_path
+        except RuntimeError:
+            _NVENC_OK["ok"] = False
+    fetch.run(head + x264 + tail, cwd=str(ass_path.parent))
     return out_path
+
+
+_NVENC_OK: dict = {}   # remembers whether the GPU encoder works on this computer
 
 
 def save_cover(video: Path, at: float, out: Path) -> Path | None:

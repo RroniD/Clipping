@@ -230,13 +230,14 @@ check_seconds = 5          # how often to re-score the latest minutes
 window_seconds = 900       # score the last 15 minutes (the z-score needs a few minutes of "normal")
 warmup_seconds = 240       # after joining a stream, wait this long before trusting any peak
 edge_seconds = 60          # ignore peaks this close to the window's oldest edge
-confirm_seconds = 45       # a peak counts only after its reaction has played out (30-60 s)
+confirm_seconds = 30       # a peak counts only after its reaction has played out (30-60 s)
 max_peaks_per_check = 10
 buffer_minutes = 6         # keep this many minutes of recorded stream on disk
 min_free_gb = 5            # pause recording if the disk has less free space than this
-segment_seconds = 10       # the recording is saved in pieces this long
+segment_seconds = 6        # the recording is saved in pieces this long (shorter = cut sooner)
 buffer_format = "best[height<=1080]/best"
-x264_threads = 4           # CPU threads for rendering clips (fewer = smoother game/stream alongside)
+x264_threads = 6           # CPU threads for rendering clips (fewer = smoother game/stream alongside)
+x264_preset = "superfast"  # faster than "veryfast", slightly bigger files; live clips reach you sooner
 whisper_model = ""         # e.g. "small" to use less GPU while gaming; "" = same as [whisper]
 min_quality = 4.5          # AI quality below this (1-10): saved for learning, but not edited into a clip
 music_removal = false      # music removal takes ~40-70 s per clip on this laptop: off live, to stay fast

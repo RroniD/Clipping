@@ -64,6 +64,19 @@ def check_gpu() -> Check:
                  "and run Update AutoClipper.bat.", important=False)
 
 
+def check_gpu_encoder() -> Check:
+    """Can ffmpeg use the graphics card's video encoder (NVENC)? Makes live clips faster."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return Check(False, "Fast video encoding (graphics card)", "ffmpeg missing", "", important=False)
+    out = _run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=black:size=256x256:duration=0.2",
+                "-c:v", "h264_nvenc", "-f", "null", "-"])
+    ok = "Error" not in out and "error" not in out.lower()
+    return Check(ok, "Fast video encoding (graphics card)", "working" if ok else "not available",
+                 "Optional: update the NVIDIA driver (GeForce Experience / nvidia.com, version 610 or newer) "
+                 "and live clips are made faster. Everything works without it.", important=False)
+
+
 def check_keys(online: bool = True) -> list[Check]:
     from dotenv import dotenv_values
     env = dotenv_values(PROJECT_ROOT / ".env") if (PROJECT_ROOT / ".env").exists() else {}
@@ -134,7 +147,8 @@ def check_setup() -> list[Check]:
 
 def run_checks(online: bool = True) -> list[Check]:
     cfg = load_config()
-    return [*check_tools(), check_gpu(), *check_keys(online), check_network(), check_disk(cfg), *check_setup()]
+    return [*check_tools(), check_gpu(), check_gpu_encoder(), *check_keys(online), check_network(), check_disk(cfg),
+            *check_setup()]
 
 
 def report(checks: list[Check]) -> str:
