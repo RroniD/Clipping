@@ -62,6 +62,22 @@ def combine(z: dict[str, np.ndarray], cfg: dict) -> np.ndarray:
     return smooth(score, int(s["smooth_seconds"]))
 
 
+def score_signals(raw: dict[str, np.ndarray], z: dict[str, np.ndarray], cfg: dict) -> np.ndarray:
+    """The detector's per-second score.
+
+    [scoring] scorer = "learned": a model trained on what viewers clipped (learned.py) scores the
+    chat + audio signals; other signals (viewer clips) are added with their hand weights.
+    scorer = "hand" (or no saved model, or no chat): the hand-weighted formula above.
+    """
+    if cfg["scoring"].get("scorer", "hand") == "learned":
+        from clipper import learned
+        s = learned.score(raw, cfg)
+        if s is not None:
+            rest = {k: v for k, v in z.items() if k not in learned.REPLACES}
+            return s + combine(rest, cfg) if rest else s
+    return combine(z, cfg)
+
+
 # --------------------------------------------------------------------------- peaks
 
 def pick_peaks(score: np.ndarray, threshold: float, min_gap: int, top_n: int) -> list[int]:
@@ -172,7 +188,7 @@ def find_candidates(raw: dict[str, np.ndarray], cfg: dict, top_n: int | None = N
     from clipper.signals import all_z_scores
 
     z = all_z_scores(raw, cfg)
-    score = combine(z, cfg)
+    score = score_signals(raw, z, cfg)
     peaks = pick_peaks(score, cfg["peaks"]["threshold"], cfg["peaks"]["min_gap_seconds"],
                        top_n or cfg["general"]["top_n"])
     candidates = []

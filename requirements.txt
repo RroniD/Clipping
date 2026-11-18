@@ -9,3 +9,4 @@ anthropic>=2.9           # Stage 1b AI judge
 websocket-client>=1.7    # only for the live Kick chat recorder
 pytest>=8                # tests
 flask>=3.0               # Stage 3 review queue
+scikit-learn>=1.3     # learned scorer (models\scorer.joblib); without it the hand formula is used

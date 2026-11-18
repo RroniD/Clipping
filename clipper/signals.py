@@ -188,6 +188,12 @@ def chat_signals(messages: list[ChatMessage], n_seconds: int, cfg: dict) -> dict
     caps = np.zeros(n_seconds)      # ALL-CAPS messages: chat shouting
     seen_users: set[str] = set()
     first_t = messages[0].t if messages else 0.0
+    # Extra chat features for the learned scorer (learned.py). Names start with "x_": they are
+    # not z-scored or weighted by the hand formula, only the model reads them.
+    moods = cfg["chat"].get("moods", {})
+    msg_len = np.zeros(n_seconds)                       # total characters typed
+    question = np.zeros(n_seconds)                      # messages with "?" (confusion, "what??")
+    mood_counts = {k: np.zeros(n_seconds) for k in moods}
 
     for m in messages:
         sec = int(math.floor(m.t - lag))
@@ -206,6 +212,11 @@ def chat_signals(messages: list[ChatMessage], n_seconds: int, cfg: dict) -> dict
         if per_user[key] > cap:
             continue
         counts[sec] += 1
+        msg_len[sec] += min(len(m.text), 200)
+        if "?" in m.text:
+            question[sec] += 1
+        for mood in moods_of(m.text, moods) if moods else ():
+            mood_counts[mood][sec] += 1
         if is_hype(m.text, hype_words, hype_phrases, c["hype_ratio"]):
             hype[sec] += 1
         letters = [ch for ch in m.text if ch.isalpha()]
@@ -233,9 +244,13 @@ def chat_signals(messages: list[ChatMessage], n_seconds: int, cfg: dict) -> dict
     for centre, _ in covered:
         unique[centre] += 1
 
-    return {"chat": _window_sum(counts, width), "unique": unique, "hype": _window_sum(hype, width),
-            "spam": _window_sum(spam, width), "newcomers": _window_sum(newcomers, width),
-            "caps": _window_sum(caps, width)}
+    out = {"chat": _window_sum(counts, width), "unique": unique, "hype": _window_sum(hype, width),
+           "spam": _window_sum(spam, width), "newcomers": _window_sum(newcomers, width),
+           "caps": _window_sum(caps, width),
+           "x_len": _window_sum(msg_len, width), "x_question": _window_sum(question, width)}
+    for mood, arr in mood_counts.items():
+        out[f"x_{mood}"] = _window_sum(arr, width)
+    return out
 
 
 # --------------------------------------------------------------------------- audio
@@ -329,6 +344,8 @@ def all_z_scores(raw: dict[str, np.ndarray], cfg: dict) -> dict[str, np.ndarray]
     floors = cfg["signals"]["floor"]
     z = {}
     for name, x in raw.items():
+        if name.startswith("x_"):          # extra features, only for the learned scorer
+            continue
         window = cfg["audio"]["baseline_seconds"] if name == "audio" else cfg["chat"]["baseline_seconds"]
         z[name] = robust_z(x, int(window), float(floors.get(name, 1.0)))
     return z

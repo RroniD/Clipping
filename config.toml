@@ -70,7 +70,11 @@ scream = 0.8               # a real scream / yell
 facecam_reaction = 0.8     # the streamer moves a lot in the webcam box (only when a face is in it)
 
 [scoring]
-z_cap = 8                  # each z-score is clipped to [0, z_cap] so one signal can't dominate
+scorer = "hand"            # "learned" = the model trained on what viewers clipped (models\scorer.joblib,
+                           # python -m clipper.bench learn); "hand" = the weighted formula below.
+                           # Without a saved model (or without chat) the hand formula is always used.
+learned_scale = 10         # the model's 0-1 output x this = same scale as the hand score
+z_cap = 8                 # each z-score is clipped to [0, z_cap] so one signal can't dominate
 both_bonus = 0.5           # bonus x min(z_audio, z_chat) when both spike together
 smooth_seconds = 3
 

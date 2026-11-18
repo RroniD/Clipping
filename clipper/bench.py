@@ -35,6 +35,7 @@ from clipper.scoring import combine, pick_peaks, rough_bounds
 OUT = PROJECT_ROOT / "out"
 BENCH = OUT / "bench"
 HIT_SECONDS = 20
+LOOSE_SECONDS = 30      # a looser hit: tells "wrong moment" apart from "right moment, timing off"
 
 
 # --------------------------------------------------------------------------- data
@@ -79,7 +80,10 @@ def human_moments(clips: list[dict], cfg: dict, n: int = 20, merge: float = 30, 
         ts = [c["vod_offset"] + centre * c["duration"] for c in g]
         best = max(g, key=lambda c: c.get("views", 0))
         moments.append({"t": float(np.median(ts)), "clippers": len(g), "views": sum(c.get("views", 0) for c in g),
-                        "start": best["vod_offset"], "end": best["vod_offset"] + best["duration"]})
+                        "start": best["vod_offset"], "end": best["vod_offset"] + best["duration"],
+                        # what the viewers' clips typically cover (median start / end)
+                        "span": (float(np.median([c["vod_offset"] for c in g])),
+                                 float(np.median([c["vod_offset"] + c["duration"] for c in g])))})
     need = min_clippers if sum(m["clippers"] >= min_clippers for m in moments) >= 10 else 2
     moments = [m for m in moments if m["clippers"] >= need]
     return sorted(moments, key=lambda m: (-m["clippers"], -m["views"]))[:n]
@@ -103,27 +107,49 @@ class VodData:
         clips = json.loads((folder / "viewer_clips.json").read_text(encoding="utf-8"))
         self.truth = human_moments(clips, cfg)
         self.all_clip_times = [c["vod_offset"] + cfg["signals"]["viewer_clip_center"] * c["duration"] for c in clips]
+        # A wider answer key for TRAINING the learned scorer: every moment 2+ viewers clipped.
+        self.train_moments = human_moments(clips, cfg, n=200, min_clippers=2)
+        self.raw0 = None
         self.z_by_lag = {}
         for lag in lags:
             c2 = {**cfg, "chat": {**cfg["chat"], "lag_seconds": lag}}
             raw = signals.chat_signals(msgs, self.n, c2)
             raw["audio"] = loud
+            if lag == 0:
+                self.raw0 = raw
             self.z_by_lag[lag] = signals.all_z_scores(raw, c2)
+        self._features = None
+
+    def features(self):
+        """The learned scorer's feature matrix (chat at lag 0: the model learns the lag itself)."""
+        if self._features is None:
+            from clipper import learned
+            self._features = learned.features(self.raw0)
+        return self._features
 
 
-def evaluate(vod: VodData, cfg: dict, lag: int) -> dict:
-    """Detector (no viewer clips) vs the human answer key for one VOD."""
-    z = vod.z_by_lag[lag]
-    score = combine(z, cfg)
+def evaluate(vod: VodData, cfg: dict, lag: int, score: np.ndarray | None = None) -> dict:
+    """Detector (no viewer clips) vs the human answer key for one VOD.
+    `score`: a ready per-second score (the learned scorer); default = the hand formula."""
+    if score is None:
+        score = combine(vod.z_by_lag[lag], cfg)
     peaks = pick_peaks(score, cfg["peaks"]["threshold"], cfg["peaks"]["min_gap_seconds"], 40)
     truth = vod.truth
     total_weight = sum(m.get("clippers", 1) for m in truth) or 1
 
-    def hits(k):
-        found = [m for m in truth if any(abs(p - m["t"]) <= HIT_SECONDS for p in peaks[:k])]
+    def hits(k, window=HIT_SECONDS):
+        found = [m for m in truth if any(abs(p - m["t"]) <= window for p in peaks[:k])]
         return found
 
+    def inside(k):
+        """Our moment lies inside what the viewers clipped (+/- 5 s). The fairest test: the
+        answer key's single time is only a guess (60% into the clips), the span is what they cut."""
+        spans = [m.get("span", (m["start"], m["end"])) for m in truth]
+        return [m for m, (a, b) in zip(truth, spans) if any(a - 5 <= p <= b + 5 for p in peaks[:k])]
+
     h15, h40 = hits(15), hits(40)
+    loose15, loose40 = hits(15, LOOSE_SECONDS), hits(40, LOOSE_SECONDS)
+    in15, in40 = inside(15), inside(40)
     errs_s, errs_e = [], []
     for m in h15:
         p = min(peaks[:15], key=lambda p: abs(p - m["t"]))
@@ -133,6 +159,11 @@ def evaluate(vod: VodData, cfg: dict, lag: int) -> dict:
     unclipped = [p for p in peaks[:15] if not any(abs(p - t) <= HIT_SECONDS for t in vod.all_clip_times)]
     return {"vod": vod.id, "recall15": len(h15) / len(truth) if truth else 0.0,
             "recall40": len(h40) / len(truth) if truth else 0.0,
+            "loose15": len(loose15) / len(truth) if truth else 0.0,
+            "loose40": len(loose40) / len(truth) if truth else 0.0,
+            "inside15": len(in15) / len(truth) if truth else 0.0,
+            "inside40": len(in40) / len(truth) if truth else 0.0,
+            "peaks": peaks,
             # Share of all the viewers' clipping effort we caught: a moment 12 people clipped counts 12x.
             "views15": sum(m.get("clippers", 1) for m in h15) / total_weight,
             "start_err": float(np.median(errs_s)) if errs_s else None,
@@ -141,7 +172,7 @@ def evaluate(vod: VodData, cfg: dict, lag: int) -> dict:
 
 
 def summary(rows: list[dict]) -> dict:
-    keys = ("recall15", "recall40", "views15")
+    keys = ("recall15", "recall40", "views15", "loose15", "loose40", "inside15", "inside40")
     return {k: round(float(np.mean([r[k] for r in rows])), 3) for k in keys}
 
 
