@@ -383,7 +383,9 @@ def build_content(d: dict, streamer: str, vod_title: str, words, chat, viewer_cl
     breakdown = ", ".join(f"{k} {v:+.1f}" for k, v in d.get("breakdown", {}).items())
     quiet = d.get("quiet_stretch_seconds")
     chat_lines = "\n".join(f"[{m.t - ws:.0f}] {m.text.strip()[:120]}" for m in chat) or "(no chat available)"
-    clips = "\n".join(f"- \"{c['title']}\" ({c.get('views', 0)} views)" for c in viewer_clips) or "(none)"
+    # (Tested: telling the model "N viewers clipped this, strong evidence" made its ranking agree
+    # LESS with viewer consensus on a real VOD (Spearman -0.13 -> -0.22), so it's not said.)
+    clips = "\n".join(f"- \"{c['title']}\" ({c.get('views', 0)} views)" for c in viewer_clips[:8]) or "(none)"
     mix = d.get("chat_mood")
     mood_line = ("Chat mood during the moment: " + ", ".join(f"{k} {v}%" for k, v in mix.items()) + "\n"
                  if mix else "")
@@ -806,7 +808,7 @@ def judge_all(results: list[dict], words_per_candidate: list, messages: list, ch
         for i, (d, words, frames) in enumerate(to_judge, 1):
             ws, we = d["window_start"], d["window_end"]
             clips = [c for c in viewer_clips or []
-                     if c["vod_offset"] < we and c["vod_offset"] + c["duration"] > ws][:8]
+                     if abs(c["vod_offset"] + 0.6 * c["duration"] - d["peak"]) <= 25]   # clips OF this moment
             content = build_content(d, streamer, vod_title, words,
                                     chat_sample(messages, ws, we, judge.cfg.chat_sample), clips, frames)
             try:

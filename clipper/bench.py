@@ -192,10 +192,11 @@ def judge_vs_views(folder: Path, cfg: dict) -> tuple[float, int] | None:
     if len(judged) < 5:
         return None
     centre = cfg["signals"]["viewer_clip_center"]
-    views = [sum(c.get("views", 0) for c in clips
-                 if abs(c["vod_offset"] + centre * c["duration"] - d["peak"]) <= HIT_SECONDS) for d in judged]
+    # How many viewers clipped this moment (the same "consensus" idea as the answer key).
+    clippers = [sum(1 for c in clips if abs(c["vod_offset"] + centre * c["duration"] - d["peak"]) <= HIT_SECONDS)
+                for d in judged]
     quality = [d.get("ai_quality", d["ai"]["score"]) for d in judged]
-    return spearman(quality, np.log1p(views)), len(judged)
+    return spearman(quality, clippers), len(judged)
 
 
 # --------------------------------------------------------------------------- report
@@ -247,7 +248,7 @@ def run(streamer: str = "ishowspeed", apply: bool = True) -> str:
     for f in folders:
         jv = judge_vs_views(f, cfg)
         if jv:
-            lines.append(f"AI judge vs viewer-clip views on {f.name}: Spearman {jv[0]:+.2f} over {jv[1]} judged moments "
+            lines.append(f"AI judge vs number of viewers who clipped the moment, on {f.name}: Spearman {jv[0]:+.2f} over {jv[1]} judged moments "
                          "(+1 = the AI ranks moments exactly like viewers' views; 0 = unrelated).")
     lines += ["", "How to read this: 'top-15 hits' is the share of the 20 most-clipped moments that are in our 15 picks.",
               "Human clippers usually post 3-15 clips per stream, so top-15 is the number that matters most.",
