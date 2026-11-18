@@ -8,7 +8,7 @@ explore_share = 0.15       # ~15% of kept slots go to ranks 16-30 ("explore"), s
                            # whether its ranking is right (see python -m clipper.learn)
 
 [chat]
-lag_seconds = 6            # chat reacts this many seconds after the moment; we shift chat earlier
+lag_seconds = 0            # chat reacts this many seconds after the moment; we shift chat earlier
                            # (per streamer it's measured from viewer clips when possible: out\<name>\calibration.json)
 smooth_seconds = 5         # messages are summed over a window this wide
 baseline_seconds = 300     # rolling window for the robust z-score
@@ -51,17 +51,19 @@ music_down_db = 15         # how much to turn loud background down
 [signals]
 # The robust z-score divides by the spread of the signal. When chat is dead the spread is 0,
 # so one message would look like a giant spike. The floor is the smallest spread we allow.
-floor = { chat = 3.0, unique = 2.0, hype = 1.0, audio = 2.0, viewer_clips = 0.5, spam = 1.0 }
+floor = { chat = 3.0, unique = 2.0, hype = 1.0, audio = 2.0, viewer_clips = 0.5, spam = 1.0, newcomers = 1.0, caps = 1.0 }
 viewer_clip_sigma = 8      # seconds; width of the bump each viewer clip adds
 viewer_clip_center = 0.6   # bump sits at vod_offset + this x clip duration
 
 [weights]
-chat = 1.0
-unique = 0.8
-hype = 1.2
-audio = 0.7
+chat = 0.26
+unique = 1.85
+hype = 1.96
+audio = 0.14
 viewer_clips = 1.5
-spam = 0.6                 # many different people typing the same thing at once
+spam = 0.01                 # many different people typing the same thing at once
+newcomers = 0.0          # first-time chatters: tested on 6 Speed VODs, did not help (kept off; retest on GTA)
+caps = 0.0               # ALL-CAPS messages: tested, did not help (kept off; retest on GTA)
 # Extra signals measured on each candidate moment (re-rank the candidates, see audio_events.py):
 laugh = 1.0                # a burst of laughter around the moment
 scream = 0.8               # a real scream / yell

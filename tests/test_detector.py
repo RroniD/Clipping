@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from clipper.config import load_config
+from helpers import spec_config
 from clipper.scoring import find_candidates
 from clipper.signals import ChatMessage, audio_loudness, chat_signals
 
@@ -62,7 +63,7 @@ def assert_found(candidates, tolerance=3):
 
 
 def test_chat_only_finds_moments_with_lag_corrected():
-    cfg = load_config(None)
+    cfg = spec_config()
     raw = chat_signals(fake_chat(random.Random(1)), DURATION, cfg)
     _, _, candidates = find_candidates(raw, cfg)
     assert_found(candidates)
@@ -70,7 +71,7 @@ def test_chat_only_finds_moments_with_lag_corrected():
 
 def test_chat_lag_matters():
     """Without lag correction the peaks land ~6 s late, outside the +/- 3 s tolerance."""
-    cfg = load_config(None)
+    cfg = spec_config()
     cfg["chat"]["lag_seconds"] = 0
     raw = chat_signals(fake_chat(random.Random(1)), DURATION, cfg)
     _, _, candidates = find_candidates(raw, cfg)
@@ -80,7 +81,7 @@ def test_chat_lag_matters():
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
 def test_audio_only_finds_moments(tmp_path):
-    cfg = load_config(None)
+    cfg = spec_config()
     wav = tmp_path / "audio.wav"
     fake_audio(wav, np.random.default_rng(2))
     loud = audio_loudness(wav, SAMPLE_RATE)
@@ -91,7 +92,7 @@ def test_audio_only_finds_moments(tmp_path):
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
 def test_chat_and_audio_together(tmp_path):
-    cfg = load_config(None)
+    cfg = spec_config()
     wav = tmp_path / "audio.wav"
     fake_audio(wav, np.random.default_rng(3))
     raw = chat_signals(fake_chat(random.Random(3)), DURATION, cfg)

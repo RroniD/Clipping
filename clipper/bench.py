@@ -153,7 +153,7 @@ def objective(rows: list[dict]) -> float:
 
 # --------------------------------------------------------------------------- tuning
 
-SIGNALS = ("chat", "unique", "hype", "audio", "spam")
+SIGNALS = ("chat", "unique", "hype", "audio", "spam", "newcomers", "caps")
 
 
 def tune(train: list[VodData], cfg: dict, trials: int = 300, seed: int = 1) -> tuple[dict, int, float]:

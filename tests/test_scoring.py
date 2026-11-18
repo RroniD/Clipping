@@ -3,11 +3,12 @@
 import numpy as np
 
 from clipper.config import load_config
+from helpers import spec_config
 from clipper.scoring import clamp_length, combine, pick_peaks, rough_bounds, snap_to_speech
 from clipper.signals import is_hype, robust_z, viewer_clip_signal
 from clipper.transcribe import Word, build_sentences
 
-CFG = load_config(None)
+CFG = spec_config()
 CLIP = CFG["clip"]
 
 
@@ -99,7 +100,7 @@ def test_clamp_stays_inside_vod():
 
 def test_combine_bonus_when_audio_and_chat_spike_together():
     z = {"chat": np.array([0, 4, 0, 0, 0.0]), "audio": np.array([0, 4, 0, 0, 0.0])}
-    cfg = load_config(None)
+    cfg = spec_config()
     cfg["scoring"]["smooth_seconds"] = 1
     score = combine(z, cfg)
     assert score[1] == 1.0 * 4 + 0.7 * 4 + 0.5 * 4

@@ -13,6 +13,7 @@ import pytest
 
 from clipper import live
 from clipper.config import load_config
+from helpers import spec_config
 from clipper.signals import ChatMessage
 
 DURATION = 1800
@@ -61,7 +62,7 @@ def simulate(cfg, msgs, audio, step=5, segment=10):
 
 
 def test_live_scorer_finds_each_moment_once_after_confirm_delay():
-    cfg = load_config()
+    cfg = spec_config()
     msgs, audio = fake_stream()
     emitted = simulate(cfg, msgs, audio)
     peaks = [p for p, _, _ in emitted]
@@ -83,7 +84,7 @@ def test_live_scorer_finds_each_moment_once_after_confirm_delay():
 
 
 def test_no_peaks_during_warmup():
-    cfg = load_config()
+    cfg = spec_config()
     msgs, audio = fake_stream()
     scorer = live.LiveScorer(cfg)
     scorer.add_messages([m for m in msgs if m.t < 200])
@@ -93,7 +94,7 @@ def test_no_peaks_during_warmup():
 
 def test_restart_does_not_repeat_moments():
     """Live mode restarted mid-stream reloads emitted peaks and must not clip them again."""
-    cfg = load_config()
+    cfg = spec_config()
     msgs, audio = fake_stream()
     first = simulate(cfg, msgs, audio)
     scorer = live.LiveScorer(cfg)
@@ -123,7 +124,7 @@ def test_read_new_chat_only_complete_lines(tmp_path):
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
 def test_buffer_cut_joins_pieces(tmp_path):
-    cfg = load_config()
+    cfg = spec_config()
     cfg["live"]["segment_seconds"] = 10       # this test makes 10-s pieces
     start = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=5)
     buf = live.StreamBuffer("https://www.twitch.tv/x", tmp_path / "buffer", start, cfg, "x")
@@ -165,7 +166,7 @@ def test_child_dies_with_parent():
 
 def test_live_viewer_clips_make_a_quiet_moment_count():
     """A moment with ordinary chat but several viewer clips must still be confirmed."""
-    cfg = load_config()
+    cfg = spec_config()
     msgs, audio = fake_stream()
     scorer = live.LiveScorer(cfg)
     scorer.add_messages([m for m in msgs])

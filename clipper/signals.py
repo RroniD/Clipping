@@ -181,9 +181,20 @@ def chat_signals(messages: list[ChatMessage], n_seconds: int, cfg: dict) -> dict
     per_user: dict[tuple[str, int], int] = {}   # (user, 5-s bucket) -> messages counted
     recent: dict[str, list[tuple[float, str]]] = {}   # normalised text -> (time, user) seen
     cap = int(c["per_user_cap"])
+    # New chatters: someone typing for the first time (in this stretch of chat). Lurkers only
+    # speak up when something big happens. The first 2 minutes are skipped: there, everyone is
+    # "new" because we just started reading.
+    newcomers = np.zeros(n_seconds)
+    caps = np.zeros(n_seconds)      # ALL-CAPS messages: chat shouting
+    seen_users: set[str] = set()
+    first_t = messages[0].t if messages else 0.0
 
     for m in messages:
         sec = int(math.floor(m.t - lag))
+        if m.user not in seen_users:
+            seen_users.add(m.user)
+            if m.t - first_t > 120 and 0 <= sec < n_seconds:
+                newcomers[sec] += 1
         if not 0 <= sec < n_seconds:
             continue
         user_seconds.add((sec, m.user))
@@ -197,6 +208,9 @@ def chat_signals(messages: list[ChatMessage], n_seconds: int, cfg: dict) -> dict
         counts[sec] += 1
         if is_hype(m.text, hype_words, hype_phrases, c["hype_ratio"]):
             hype[sec] += 1
+        letters = [ch for ch in m.text if ch.isalpha()]
+        if len(letters) >= 4 and sum(ch.isupper() for ch in letters) >= 0.8 * len(letters):
+            caps[sec] += 1
         # Spam wave: many DIFFERENT people typing the same thing within 10 s ("LMAOOO",
         # "HE DIDNT", a copypasta) is a strong sign everyone saw the same moment.
         norm = _norm(m.text)
@@ -220,7 +234,8 @@ def chat_signals(messages: list[ChatMessage], n_seconds: int, cfg: dict) -> dict
         unique[centre] += 1
 
     return {"chat": _window_sum(counts, width), "unique": unique, "hype": _window_sum(hype, width),
-            "spam": _window_sum(spam, width)}
+            "spam": _window_sum(spam, width), "newcomers": _window_sum(newcomers, width),
+            "caps": _window_sum(caps, width)}
 
 
 # --------------------------------------------------------------------------- audio
