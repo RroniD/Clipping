@@ -107,6 +107,35 @@ class LiveChecker:
                     "title": s.get("title", ""), "game": s.get("game_name", "")}
                 for s in data if s.get("type") == "live"}
 
+    def twitch_live_clips(self, login: str, stream_start: datetime, since: datetime) -> list[dict]:
+        """Viewer clips of a live stream created after `since`. While live, Twitch doesn't give a
+        position in the (unfinished) VOD, but it gives when the clip was MADE: the clip covers the
+        `duration` seconds before that, so it starts at (created - stream start - duration)."""
+        if not (self.twitch_id and self.twitch_secret):
+            return []
+        if self.token is None:
+            self.token = fetch.twitch_app_token(self.twitch_id, self.twitch_secret)
+        if not hasattr(self, "_user_ids"):
+            self._user_ids = {}
+        if login not in self._user_ids:
+            users = fetch._helix_get("users", {"login": login}, self.twitch_id, self.token)["data"]
+            self._user_ids[login] = users[0]["id"] if users else None
+        uid = self._user_ids[login]
+        if not uid:
+            return []
+        data = fetch._helix_get("clips", {"broadcaster_id": uid, "first": 100,
+                                          "started_at": since.isoformat().replace("+00:00", "Z")},
+                                self.twitch_id, self.token)["data"]
+        out = []
+        for c in data:
+            created = datetime.fromisoformat(c["created_at"].replace("Z", "+00:00"))
+            if created < stream_start:
+                continue
+            dur = float(c.get("duration", 30))
+            out.append({"id": c["id"], "vod_offset": (created - stream_start).total_seconds() - dur,
+                        "duration": dur, "views": c.get("view_count", 0)})
+        return out
+
     @staticmethod
     def kick(slug: str) -> dict | None:
         from clipper.kick_chat import lookup_channel
@@ -392,6 +421,13 @@ class LiveScorer:
         self.first_second: float | None = None   # first second we have any data for
         self.emitted: list[float] = []           # peaks already turned into clips
         self.last_chat_z: tuple[int, np.ndarray] | None = None
+        self.clips: dict[str, dict] = {}         # viewer clips made during the stream, by clip id
+
+    def add_clips(self, clips: list[dict]) -> None:
+        """Viewer clips made during the live stream: {"id", "vod_offset" (stream seconds where the
+        clip starts), "duration", "views"} - the same shape as VOD mode, so the same signal."""
+        for c in clips:
+            self.clips[c["id"]] = c
 
     def add_messages(self, msgs: list[ChatMessage]) -> None:
         if msgs:
@@ -439,6 +475,12 @@ class LiveScorer:
             raw["audio"] = filled
         if not raw:
             return []
+        if self.clips:
+            # Viewers clipping a moment is the strongest signal we have (the benchmark showed chat
+            # alone is weak for very busy chats). Shift the clips into the window's time axis.
+            window_clips = [{**c, "vod_offset": c["vod_offset"] - w0} for c in self.clips.values()
+                            if c["vod_offset"] + c["duration"] > w0]
+            raw["viewer_clips"] = signals.viewer_clip_signal(window_clips, n, self.cfg)
         z, score, cands = find_candidates(raw, self.cfg, top_n=lv["max_peaks_per_check"])
         if "chat" in z:
             self.last_chat_z = (w0, z["chat"])
@@ -528,6 +570,17 @@ class Session:
         if time.time() - self.last_tick < self.cfg["live"]["check_seconds"]:
             return
         self.last_tick = time.time()
+
+        # Viewer clips made in the last 15 minutes (Twitch), every clip_poll_seconds.
+        checker = getattr(self, "checker", None)
+        if (checker is not None and self.platform == "twitch"
+                and time.time() - getattr(self, "last_clip_poll", 0) >= self.cfg["live"]["clip_poll_seconds"]):
+            self.last_clip_poll = time.time()
+            try:
+                since = datetime.now(timezone.utc) - __import__("datetime").timedelta(minutes=15)
+                self.scorer.add_clips(checker.twitch_live_clips(self.name, self.start, since))
+            except Exception as exc:
+                log(self.name, f"couldn't read viewer clips ({str(exc)[:120]})")
 
         # New chat since last time.
         msgs, self.chat_pos = read_new_chat(self.jsonl, self.chat_pos)
@@ -823,6 +876,7 @@ def run(cfg: dict, only: list[str] | None = None, test_channel: str | None = Non
                     if sess is None:
                         sessions[n] = Session(n, watch[n].get("platform", "twitch"), info, cfg, jobs,
                                               out_root, save_clips=not test_channel)
+                        sessions[n].checker = checker   # for the viewer clips made during the stream
                 for n in list(sessions):
                     if n in live_now:
                         sessions[n].offline_checks = 0

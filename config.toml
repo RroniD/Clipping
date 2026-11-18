@@ -232,6 +232,7 @@ submit_minutes = 30        # after approving, post + submit to the campaign with
 # Stage 4: live mode (python -m clipper.live)
 poll_seconds = 60          # how often to ask Twitch/Kick who is live
 check_seconds = 5          # how often to re-score the latest minutes
+clip_poll_seconds = 30     # how often to ask Twitch for viewer clips made during the stream
 window_seconds = 900       # score the last 15 minutes (the z-score needs a few minutes of "normal")
 warmup_seconds = 240       # after joining a stream, wait this long before trusting any peak
 edge_seconds = 60          # ignore peaks this close to the window's oldest edge

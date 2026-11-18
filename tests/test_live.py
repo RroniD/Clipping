@@ -162,3 +162,27 @@ def test_child_dies_with_parent():
             break
         time.sleep(0.1)
     assert not alive
+
+def test_live_viewer_clips_make_a_quiet_moment_count():
+    """A moment with ordinary chat but several viewer clips must still be confirmed."""
+    cfg = load_config()
+    msgs, audio = fake_stream()
+    scorer = live.LiveScorer(cfg)
+    scorer.add_messages([m for m in msgs])
+    scorer.add_audio(0, audio)
+    quiet = 1300                                  # nothing special in chat or audio here
+    scorer.add_clips([{"id": f"c{i}", "vod_offset": quiet - 18 + i, "duration": 30, "views": 5} for i in range(6)])
+    peaks = [c.peak for c in scorer.confirmed_peaks(1400)]   # window 500-1400 s
+    assert any(abs(p - quiet) <= 15 for p in peaks)   # the clip bump is ~8 s wide
+
+
+def test_live_clip_times_from_creation_time(monkeypatch):
+    start = datetime(2026, 11, 19, 18, 0, tzinfo=timezone.utc)
+    checker = live.LiveChecker()
+    checker.twitch_id, checker.twitch_secret, checker.token = "id", "secret", "tok"
+    checker._user_ids = {"speed": "42"}
+    created = (start + timedelta(seconds=630)).isoformat().replace("+00:00", "Z")
+    monkeypatch.setattr(live.fetch, "_helix_get", lambda path, params, cid, tok: {"data": [
+        {"id": "a", "created_at": created, "duration": 30.0, "view_count": 12}]})
+    clips = checker.twitch_live_clips("speed", start, start)
+    assert clips == [{"id": "a", "vod_offset": 600.0, "duration": 30.0, "views": 12}]

@@ -306,6 +306,7 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                  'submit_minutes': 30},
     'live': {   'poll_seconds': 60,
                 'check_seconds': 5,
+                'clip_poll_seconds': 30,
                 'window_seconds': 900,
                 'warmup_seconds': 240,
                 'edge_seconds': 60,
