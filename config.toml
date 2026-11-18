@@ -43,6 +43,8 @@ baseline_seconds = 300
 music_removal = "demucs"   # "demucs" = when a clip's background music is LOUD (copyright-claim risk),
                            # split voice from background and turn the background down. Needs the
                            # separate .venv-demucs environment (see README). "off" = never.
+events = true              # detect laughter / screams / music in candidate moments (PANNs model)
+music_only_share = 0.7     # music in 70%+ of a clip with almost no talking -> warning (cutscene/copyright)
 music_loud_db = 6          # "loud" = background less than 6 dB quieter than the voice
 music_down_db = 15         # how much to turn loud background down
 
@@ -60,6 +62,10 @@ hype = 1.2
 audio = 0.7
 viewer_clips = 1.5
 spam = 0.6                 # many different people typing the same thing at once
+# Extra signals measured on each candidate moment (re-rank the candidates, see audio_events.py):
+laugh = 1.0                # a burst of laughter around the moment
+scream = 0.8               # a real scream / yell
+facecam_reaction = 0.8     # the streamer moves a lot in the webcam box (only when a face is in it)
 
 [scoring]
 z_cap = 8                  # each z-score is clipped to [0, z_cap] so one signal can't dominate

@@ -215,7 +215,8 @@ def _caption_text(text: str, upper: bool) -> str:
 
 def build_ass(chunks: list[dict], duration: float, hook: str, credit: str,
               positions: dict[str, int], cfg: dict, banner: str = "", disclosure: str = "",
-              disclosure_seconds: float = 0.0, punch_words: list[str] | tuple = ()) -> str:
+              disclosure_seconds: float = 0.0, punch_words: list[str] | tuple = (),
+              small_lines: list[dict] | tuple = ()) -> str:
     """Write the whole subtitle file: captions, hook, context banner, disclosure and credit.
 
     Colours in ASS are &HAABBGGRR (alpha first, then blue-green-red, alpha 00 = solid).
@@ -243,6 +244,7 @@ Style: Caption,{font},{e['caption_size']},&H00FFFFFF,&H00FFFFFF,&H00000000,&H900
 Style: Hook,{font},{e['hook_size']},&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,3,22,0,5,110,110,0,1
 Style: Credit,{font},{e['credit_size']},&H30FFFFFF,&H30FFFFFF,&H60000000,&H00000000,-1,0,0,0,100,100,0,0,1,3,0,1,40,40,0,1
 Style: Banner,{font},{e['banner_size']},&H00FFFFFF,&H00FFFFFF,&HB4000000,&HB4000000,-1,0,0,0,100,100,0,0,3,14,0,5,{e['safe_left']},{OUT_W - e['safe_right']},0,1
+Style: Original,Arial,40,&H00E6E6E6,&H00E6E6E6,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,4,1,5,{e['safe_left']},{OUT_W - e['safe_right']},0,1
 Style: Disclosure,Arial,30,&H00FFFFFF,&H00FFFFFF,&H90000000,&H90000000,-1,0,0,0,100,100,0,0,3,8,0,8,0,0,0,1
 
 [Events]
@@ -287,6 +289,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         # Campaign disclosure ("#ad", "Sponsored by ...") burned into the opening seconds.
         lines.append(f"Dialogue: 3,{_ass_time(0)},{_ass_time(min(disclosure_seconds, duration))},Disclosure,,0,0,0,,"
                      f"{{\\an8\\pos({cx},{positions['disclosure']})}}{_ass_text(disclosure)}")
+    for ln in small_lines:
+        # captions = "both": the original-language sentence, small, under the English captions.
+        # Arial has Arabic/Cyrillic/accented glyphs, and libass shapes right-to-left text itself.
+        lines.append(f"Dialogue: 1,{_ass_time(ln['start'] - lead)},{_ass_time(ln['end'] - lead)},Original,,0,0,0,,"
+                     f"{{\\pos({cx},{cy + 95})}}{_ass_text(ln['text'])}")
     if credit:
         # Bottom-left corner of the safe zone.
         lines.append(f"Dialogue: 0,{_ass_time(0)},{_ass_time(duration)},Credit,,0,0,0,,"
@@ -578,6 +585,36 @@ def remove_music(source: Path, offset: float, duration: float, work: Path, cfg: 
     return mixed, f"loud background music was turned down {down:.0f} dB (check the sound before posting)"
 
 
+def translated_words(segments: list, clip_start: float, clip_end: float) -> list[dict]:
+    """English caption 'words' from translated lines: each line's words are spread evenly over
+    the time the original sentence was spoken (we don't know exact timings for a translation,
+    but the right sentence on screen while it's said reads naturally)."""
+    out = []
+    for a, b, _src, en in segments:
+        if b <= clip_start or a >= clip_end or not en.strip():
+            continue
+        a, b = max(a, clip_start), min(b, clip_end)
+        toks = en.split()
+        step = (b - a) / len(toks)
+        out += [{"start": a + i * step - clip_start, "end": a + (i + 1) * step - clip_start, "text": t}
+                for i, t in enumerate(toks)]
+    return out
+
+
+def original_lines(segments: list, clip_start: float, clip_end: float) -> list[dict]:
+    """The original-language sentences (for captions = "both"), in clip time."""
+    return [{"start": max(a, clip_start) - clip_start, "end": min(b, clip_end) - clip_start, "text": src}
+            for a, b, src, _en in segments if b > clip_start and a < clip_end and src.strip()]
+
+
+def caption_mode(streamer_cfg: dict, d: dict) -> str:
+    """"original" / "english" / "both". Default: english for non-English speech."""
+    mode = streamer_cfg.get("captions")
+    if mode in ("original", "english", "both"):
+        return mode
+    return "english" if d.get("language", "en") != "en" else "original"
+
+
 def _words_for(d: dict, clip_start: float, clip_end: float) -> list[dict] | None:
     """Words saved by run.py (VOD seconds) -> clip seconds. None if this run didn't save any."""
     if "words" not in d:
@@ -757,7 +794,18 @@ class ClipRenderer:
         else:
             main = segments
         edited = sum(b - a for a, b in segments)
-        words_edit = remap_words(words, main, lead_in)
+        # Captions: the streamer's own words, or the AI's English translation (non-English
+        # streams: most viewers of a viral clip don't speak the streamer's language).
+        mode = caption_mode(streamers[streamer], d)
+        trans = d.get("translated_segments") or []
+        caption_words, small_lines = words, []
+        if mode in ("english", "both") and trans:
+            caption_words = translated_words(trans, start, end)
+            if mode == "both":
+                small_lines = [{**ln, "start": remap(ln["start"], main, lead_in) or 0.0,
+                                "end": remap(ln["end"], main, lead_in) or 0.0}
+                               for ln in original_lines(trans, start, end)]
+        words_edit = remap_words(caption_words, main, lead_in)
         zoom_at = remap(peak, main, lead_in)
 
         # 4. Subtitle file: captions, hook, context banner, campaign disclosure, credit.
@@ -775,7 +823,8 @@ class ClipRenderer:
         ass_path.write_text(build_ass(chunks, edited, hook, credit, text_positions(layout, cfg), cfg,
                                       banner=banner, disclosure=disclosure,
                                       disclosure_seconds=float((profile or {}).get("disclosure_seconds", 3)),
-                                      punch_words=ai.get("punch_words", [])),
+                                      punch_words=ai.get("punch_words", []),
+                                      small_lines=[ln for ln in small_lines if ln["end"] > ln["start"]]),
                             encoding="utf-8")
 
         # 5. Optional music removal, then one ffmpeg render, then the cover image.

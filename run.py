@@ -184,6 +184,7 @@ def main() -> None:
     print("6/9 Transcribing candidate windows and snapping to speech")
     jcfg = cfg["judge"]
     words_by_candidate: dict[int, list] = {}
+    language_by_candidate: dict[int, str] = {}
     if not args.no_transcribe and candidates:
         transcriber = Transcriber(cfg)
         # Transcribe the whole stretch the AI may cut from (plus margin), not just the rough clip.
@@ -191,6 +192,7 @@ def main() -> None:
         for i, c in enumerate(candidates, 1):
             print(f"    [{i}/{len(candidates)}] {hms(c.peak)}")
             words = transcriber.transcribe_window(audio_path, c.start - pad, c.end + pad)
+            language_by_candidate[id(c)] = transcriber.last_language
             sentences = build_sentences(words, cfg["whisper"]["sentence_gap"])
             c.start, c.end = snap_to_speech(c.start, c.end, c.peak, sentences, cfg["clip"])
             words_by_candidate[id(c)] = words
@@ -205,6 +207,7 @@ def main() -> None:
         d["peak_time"] = hms(c.peak)
         d["window_start"] = round(max(0.0, c.start - jcfg["window_before"]), 2)
         d["window_end"] = round(min(float(n_seconds), c.end + jcfg["window_after"]), 2)
+        d["language"] = language_by_candidate.get(id(c), "en")
         if messages:
             d["chat_mood"] = signals.mood_mix(messages, c.start, c.end, cfg)
         if launch_warning:
@@ -248,6 +251,36 @@ def main() -> None:
                 d["framecheck_reasons"] = framecheck.framecheck_reasons(s, hud_ref, cfg)
         flagged = sum(bool(d.get("framecheck_reasons")) for d in results)
         print(f"    frame check: {flagged} moment(s) look like a cutscene or loading screen")
+
+    # Extra signals on each candidate: laughter / screams / music (PANNs), and how much the
+    # streamer moves in the webcam box. They re-rank the candidates before the AI judge.
+    import time as _time
+    t0 = _time.time()
+    from clipper import audio_events
+    from clipper.edit import layout_for
+    from clipper.layoutcheck import reaction_score
+    facecam = layout_for(streamer_cfg).facecam if streamer_cfg.get("facecam") else None
+    for d in results:
+        d["extra_signals"] = {}
+        if facecam is not None and d.get("analysis"):
+            try:
+                has_face, score = reaction_score(out_dir / d["analysis"], d["window_start"], d["window_start"],
+                                                 d["window_end"], d["peak"], facecam, cfg)
+                if has_face:
+                    d["extra_signals"]["facecam_reaction"] = score
+            except Exception:
+                pass
+    if cfg["audio"]["events"] and audio_events.available():
+        probs = audio_events.analyse(audio_path, [(d["window_start"], d["window_end"]) for d in results])
+        for d, p in zip(results, probs):
+            if p:
+                d["extra_signals"].update(audio_events.event_features(p, d["window_start"], d["peak"],
+                                                                      d["start"], d["end"]))
+                warn = audio_events.music_warning(d["extra_signals"], cfg)
+                if warn:
+                    d.setdefault("extra_warnings", []).append(warn)
+    audio_events.apply_boost(results, cfg)
+    print(f"    laughter/screams/facecam reactions measured in {_time.time() - t0:.0f} s")
 
     print("8/9 AI judge: watching, cutting and ranking the moments")
     judge = None

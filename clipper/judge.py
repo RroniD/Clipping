@@ -73,6 +73,8 @@ JUDGE_SCHEMA = {
                         "description": "1-2 words from the transcript to highlight in the captions"},
         "caption": {"type": "string", "description": "short post caption for TikTok (one line, no hashtags)"},
         "story_beat": {"type": "boolean", "description": "a story mission ending / major story moment"},
+        "translations": {"type": "array", "items": {"type": "string"},
+                         "description": "non-English transcript only: English for each numbered line"},
         "context_line": {"type": "string", "description": "max 10 words: who/what, shown as a banner"},
         "title": {"type": "string"},
         "hashtags": {"type": "array", "items": {"type": "string"}},
@@ -81,7 +83,7 @@ JUDGE_SCHEMA = {
     },
     "required": ["category", "standalone", "hook_strength", "payoff", "score", "setup_start", "cut_start", "cut_end",
                  "visual_payoff", "facecam_reaction", "is_cutscene", "menu_or_map", "layout", "hook_options",
-                 "hook", "title_options", "punch_words", "caption", "story_beat", "context_line",
+                 "hook", "title_options", "punch_words", "caption", "story_beat", "translations", "context_line",
                  "title", "hashtags", "spoiler_risk", "reason"],
     "additionalProperties": False,
 }
@@ -142,6 +144,11 @@ caption: a short, natural post caption for TikTok (under 100 characters, no hash
 people want to comment, e.g. "he really thought that would work".
 
 title_options: 2 different titles; title = the better one.
+
+translations: if the streamer does NOT speak English, give a short, natural English version of \
+EVERY numbered transcript line, in the same order (one string per line, as people would say it, \
+slang kept: "no way bro"). Write the hook, titles, caption, context line and punch words in \
+English too (punch words from your translation). If the transcript is English: [].
 
 context_line: at most 10 words that tell a stranger who and what this is, shown as a banner for \
 the rest of the clip ("Speed tries to rob a bank with his own crew"). This added context is what \
@@ -268,6 +275,8 @@ def validate(data: dict, window_len: float | None = None) -> dict:
             "hook_options": hook_options, "title_options": title_options, "punch_words": [p for p in punch if p],
             "caption": " ".join(str(data.get("caption", "")).split())[:150],
             "story_beat": bool(data.get("story_beat")),
+            "translations": [" ".join(str(t).split())[:200] for t in (data.get("translations") or [])
+                             if isinstance(t, str)][:60],
             "context_line": context, "facecam_reaction": reaction,
             "is_cutscene": bool(data["is_cutscene"]), "menu_or_map": bool(data["menu_or_map"]),
             "layout": data["layout"] if data.get("layout") in ("split", "no_facecam", "crop") else None,
@@ -287,28 +296,35 @@ def chat_sample(messages, start: float, end: float, n: int) -> list:
     return inside
 
 
-def timestamped_transcript(words, window_start: float, window_end: float, gap: float = 0.8) -> str:
-    """'[3.2-7.9] so I went into the bank' lines, one per sentence, times from the window start."""
-    if not words:
-        return "(no transcript)"
+def transcript_lines(words, window_start: float, window_end: float, gap: float = 0.8) -> list[tuple]:
+    """The words of the window grouped into sentences: [(start, end, text)] in VOD seconds."""
     lines, cur = [], []
 
     def flush():
         if cur:
-            lines.append(f"[{cur[0].start - window_start:.1f}-{cur[-1].end - window_start:.1f}] "
-                         + " ".join(w.text for w in cur))
+            lines.append((cur[0].start, cur[-1].end, " ".join(w.text for w in cur)))
             cur.clear()
 
-    for w in words:
+    for w in words or []:
         if w.end < window_start or w.start > window_end:
             continue
         if cur and w.start - cur[-1].end > gap:
             flush()
         cur.append(w)
-        if w.text.endswith((".", "!", "?")):
+        if w.text.endswith((".", "!", "?", "。", "؟")):
             flush()
     flush()
-    return "\n".join(lines) or "(no speech in this window)"
+    return lines
+
+
+def timestamped_transcript(words, window_start: float, window_end: float, gap: float = 0.8) -> str:
+    """'#1 [3.2-7.9] so I went into the bank' lines, one per sentence, times from the window start.
+    Numbered, so a translation can be matched back to each line's time span."""
+    if not words:
+        return "(no transcript)"
+    lines = transcript_lines(words, window_start, window_end, gap)
+    return "\n".join(f"#{i} [{a - window_start:.1f}-{b - window_start:.1f}] {t}"
+                     for i, (a, b, t) in enumerate(lines, 1)) or "(no speech in this window)"
 
 
 def build_content(d: dict, streamer: str, vod_title: str, words, chat, viewer_clips,
@@ -332,6 +348,8 @@ def build_content(d: dict, streamer: str, vod_title: str, words, chat, viewer_cl
         f"Signal strengths at the peak (z-scores, higher = more unusual): {breakdown}\n"
         + (f"Longest stretch with no streamer speech and quiet chat: {quiet} s\n" if quiet is not None else "")
         + mood_line + check_line
+        + (f"Spoken language (detected): {d['language']} - NOT English: fill in translations.\n"
+           if d.get("language") and d["language"] != "en" else "")
         + f"\nTranscript (timestamps in seconds from the window start):\n"
           f"{timestamped_transcript(words, ws, we)}\n"
           f"\nChat (seconds from the window start; chat reacts a few seconds late):\n{chat_lines}\n"
@@ -642,6 +660,12 @@ def judge_all(results: list[dict], words_per_candidate: list, messages: list, ch
                                     chat_sample(messages, ws, we, judge.cfg.chat_sample), clips, frames)
             try:
                 d["ai"] = judge.judge(content, we - ws)
+                lines = transcript_lines(words, ws, we)
+                if d["ai"]["translations"] and lines:
+                    # Line i of the translation gets line i's time span (VOD seconds), so the
+                    # English captions appear while that sentence is being said.
+                    d["translated_segments"] = [[round(a, 2), round(b, 2), src, en] for (a, b, src), en
+                                                in zip(lines, d["ai"]["translations"])]
                 d["pre_judge_start"] = d["start"]
                 d["start"], d["end"] = apply_cut(ws, d["ai"], words, d["peak"], cfg["clip"], vod_length,
                                                  detector_start=d["start"],

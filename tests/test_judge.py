@@ -20,7 +20,7 @@ GOOD = {"category": "funny", "standalone": 8, "hook_strength": 7, "payoff": 9, "
         "visual_payoff": 7, "facecam_reaction": "big", "is_cutscene": False, "menu_or_map": False,
         "layout": "split", "hook_options": ["He did NOT see that coming", "5 stars in 10 seconds", "Chat warned him"],
         "title_options": ["Speed trusted his crew... mistake", "Worst getaway ever"], "punch_words": ["WASTED"],
-        "caption": "he really thought that would work", "story_beat": False,
+        "caption": "he really thought that would work", "story_beat": False, "translations": [],
         "setup_start": 5.0, "cut_start": 5.0, "cut_end": 30.0, "hook": "He did NOT see that coming",
         "context_line": "Speed trusts his crew with the money", "title": "Speed trusted his crew... mistake",
         "hashtags": ["#ishowspeed", "gta", "funny"], "spoiler_risk": "none", "reason": "Funny crash."}
@@ -215,7 +215,7 @@ def test_chat_sample_spreads_and_includes_lag():
 
 def test_timestamped_transcript_groups_sentences():
     words = [Word(1, 1.5, "hi."), Word(2, 2.5, "so"), Word(4, 4.5, "what")]
-    assert timestamped_transcript(words, 0, 10) == "[1.0-1.5] hi.\n[2.0-2.5] so\n[4.0-4.5] what"
+    assert timestamped_transcript(words, 0, 10) == "#1 [1.0-1.5] hi.\n#2 [2.0-2.5] so\n#3 [4.0-4.5] what"
 
 
 def _results():
@@ -282,3 +282,15 @@ def test_local_story_words_warn():
     assert "mission passed" in story_reason("yo mission passed let's go", [], CFG)
     assert story_reason("", ["SPOILERS", "spoilers!!", "SPOILER ALERT"], CFG)
     assert story_reason("we crashed the car lol", ["KEKW"], CFG) is None
+
+
+def test_translations_are_matched_to_line_times():
+    words = [Word(101.0, 101.5, "no"), Word(101.5, 102.0, "puede."), Word(105.0, 105.5, "mira")]
+    data = {**GOOD, "translations": ["no way", "look"]}
+    client = FakeClient([reply(data)])
+    d = {"peak_score": 5.0, "start": 100.0, "end": 130.0, "peak": 110, "duration": 30.0, "peak_time": "x",
+         "breakdown": {}, "window_start": 95.0, "window_end": 135.0, "language": "es"}
+    judge_all([d], [words], [], None, CFG, "s", "t", Judge(CFG, client=client), log=lambda *_: None)
+    assert d["translated_segments"] == [[101.0, 102.0, "no puede.", "no way"], [105.0, 105.5, "mira", "look"]]
+    sent = client.calls[0]["messages"][0]["content"][0]["text"]
+    assert "NOT English" in sent and "#1 [6.0-7.0] no puede." in sent

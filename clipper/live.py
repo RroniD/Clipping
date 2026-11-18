@@ -659,6 +659,7 @@ class ClipWorker(threading.Thread):
                   "window_start": round(max(job.source_start, c.start - j["window_before"]), 2),
                   "window_end": round(min(job.source_end, c.end + j["window_after"]), 2),
                   "chat_mood": signals.mood_mix(s.scorer.messages, c.start, c.end, cfg),
+                  "language": self.transcriber.last_language,
                   "extra_warnings": [s.launch_warning] if s.launch_warning else []})
 
         # Local frame check + frames for the AI, both straight from our own recording.

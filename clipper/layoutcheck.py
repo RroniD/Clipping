@@ -108,6 +108,33 @@ def local_layout(frames: np.ndarray, facecam: tuple[float, float, float, float] 
     return "no_facecam", reason, stats
 
 
+def reaction_score(video: Path, video_start: float, window_start: float, window_end: float, peak: float,
+                   facecam, cfg: dict, fps: int = 4) -> tuple[bool, float]:
+    """How big the streamer's visible reaction is around the peak: (face_in_box, score).
+
+    Movement in the facecam box (frame-to-frame difference at 4 frames a second) in the 5 s
+    before to 8 s after the peak, divided by the box's typical movement over the whole window.
+    A streamer jumping up, screaming or leaning into the camera scores 2-5; sitting still ~1.
+    Only meaningful when the box really shows a face (otherwise it's game scenery moving).
+    """
+    if facecam is None:
+        return False, 0.0
+    n = max(2, int((window_end - window_start) * fps))
+    frames = rgb_frames(video, window_start - video_start, window_end - video_start, n=n)
+    if len(frames) < 3:
+        return False, 0.0
+    layout, _, _ = local_layout(frames, facecam, cfg)
+    if layout != "split":
+        return False, 0.0
+    gray = _crop(frames, facecam).mean(axis=3)
+    motion = np.abs(np.diff(gray, axis=0)).mean(axis=(1, 2))           # one value per frame step
+    times = window_start + (np.arange(len(motion)) + 1) * (window_end - window_start) / len(frames)
+    near = motion[(times >= peak - 5) & (times <= peak + 8)]
+    if len(near) == 0:
+        return True, 0.0
+    return True, round(float(near.max() / (np.median(motion) + 1.0)), 2)
+
+
 def choose_layout(d: dict, video: Path | None, video_start: float, facecam, cfg: dict) -> None:
     """Set d["layout"] and d["layout_reason"] for one candidate.
     video: a copy of the moment (run.py's 360p analysis clip, or live mode's own recording)

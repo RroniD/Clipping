@@ -217,3 +217,25 @@ def test_punch_words_get_their_own_colour():
     lines = [l for l in ass.splitlines() if l.startswith("Dialogue: 1,")]
     assert cfg["edit"]["punch_color"] in lines[0]                    # red even before it's spoken
     assert "\\fscx118" in lines[2] and "\\fscx118" not in lines[0]  # grows when spoken
+
+
+def test_translated_words_follow_the_original_sentences():
+    segs = [[100.0, 104.0, "no puede ser", "no way bro"], [106.0, 108.0, "mira", "look"]]
+    w = edit.translated_words(segs, 99.0, 120.0)
+    assert [x["text"] for x in w] == ["no", "way", "bro", "look"]
+    assert w[0]["start"] == pytest.approx(1.0) and w[2]["end"] == pytest.approx(5.0)   # spread over 100-104
+    assert edit.original_lines(segs, 99.0, 120.0)[0] == {"start": 1.0, "end": 5.0, "text": "no puede ser"}
+
+
+def test_caption_mode_defaults():
+    assert edit.caption_mode({}, {"language": "es"}) == "english"
+    assert edit.caption_mode({}, {"language": "en"}) == "original"
+    assert edit.caption_mode({"captions": "both"}, {"language": "ar"}) == "both"
+
+
+def test_both_mode_adds_the_original_line_small():
+    cfg = load_config()
+    pos = edit.text_positions(edit.layout_for({"facecam": [0, 0, 400, 300]}), cfg)
+    ass = edit.build_ass(edit.chunk_words(words((0.5, 1.0, "no"), (1.0, 1.5, "way"))), 5.0, "", "", pos, cfg,
+                         small_lines=[{"start": 0.5, "end": 1.5, "text": "لا يمكن"}])
+    assert ",Original,," in ass and "لا يمكن" in ass
