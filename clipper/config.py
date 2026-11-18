@@ -229,7 +229,7 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                       'hud_missing_seconds': 5,
                       'blank_std': 8,
                       'blank_seconds': 3},
-    'layout': {   'auto': True,
+    'layout': {   'auto': False,
                   'find_facecam': True,
                   'face_skin': 0.3,
                   'box_max_motion': 15,

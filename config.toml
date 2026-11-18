@@ -132,7 +132,9 @@ blank_seconds = 3          # ...for at least this long
 
 [layout]
 # Pick split / no_facecam / crop per clip (clipper/layoutcheck.py + the AI judge).
-auto = true                # false = always use the streamer's layout from streamers.toml
+auto = false               # false = always use the streamer's layout from streamers.toml
+                           # (off since Nov 18: Lacy's dark webcam failed the skin check -> game-only clips,
+                           # but his campaign needs him on screen. Set true again to let it decide per clip.)
 find_facecam = true        # if the measured webcam box shows no face, search the frame edges for the webcam
 face_skin = 0.30           # facecam box has a face: >= 30% skin-coloured pixels...
 box_max_motion = 15        # ...and the box is steady (webcam ~7; game scenery 27-40 in real clips)
