@@ -98,6 +98,9 @@ sentence_gap = 0.8         # a pause this long (s) also ends a sentence
 gta6_us_launch_utc = "2026-11-19T00:00:00-05:00"
 title_patterns = ["gta ?6", "gta ?vi\\b", "grand theft auto ?(vi|6)\\b"]
 launch_mode = true         # launch weeks: spoiler_risk "low" also gets the warning flag
+# Words that suggest a story moment (in what the streamer says, or 3+ times in chat).
+story_words = ["spoiler", "spoilers", "mission passed", "mission complete", "mission failed", "cutscene",
+               "the ending", "end credits", "final mission", "plot twist", "he died", "she died"]
 
 [framecheck]
 # A cheap local look at the clip (1 frame per second) for cutscenes and loading screens.
@@ -166,6 +169,7 @@ caption_gap = 0.6          # a pause this long (s) starts a new caption
 caption_uppercase = true
 caption_highlight = "&H00FFFF&"   # the word being spoken turns this colour (yellow; ASS colours are BGR)
 caption_lead = 0.1         # captions appear this much before the word is spoken (feels in sync)
+punch_color = "&H3C3CFF&"  # the AI's 1-2 "punch words" get this colour (red) and grow a little
 caption_y_no_facecam = 0.62   # caption height as a share of the screen (0 = top)
 caption_y_crop = 0.62
 hook = true                # big hook text for the first seconds (from the AI judge)

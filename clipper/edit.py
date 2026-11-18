@@ -212,7 +212,7 @@ def _caption_text(text: str, upper: bool) -> str:
 
 def build_ass(chunks: list[dict], duration: float, hook: str, credit: str,
               positions: dict[str, int], cfg: dict, banner: str = "", disclosure: str = "",
-              disclosure_seconds: float = 0.0) -> str:
+              disclosure_seconds: float = 0.0, punch_words: list[str] | tuple = ()) -> str:
     """Write the whole subtitle file: captions, hook, context banner, disclosure and credit.
 
     Colours in ASS are &HAABBGGRR (alpha first, then blue-green-red, alpha 00 = solid).
@@ -248,6 +248,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     lines = []
     cx, cy, hy = positions["x"], positions["caption"], positions["hook"]
     lead, hl, upper = float(e["caption_lead"]), e["caption_highlight"], e["caption_uppercase"]
+    punch = {re.sub(r"[^\w']", "", p).lower() for p in punch_words if p}
+
+    def styled(t: str, raw: str, active: bool) -> str:
+        # Punch words (the AI's 1-2 key words) are always red and grow when spoken;
+        # the word being spoken is yellow.
+        if re.sub(r"[^\w']", "", raw).lower() in punch:
+            grow = "\\fscx118\\fscy118" if active else ""
+            return f"{{\\c{e['punch_color']}{grow}}}{t}{{\\c&HFFFFFF&\\fscx100\\fscy100}}"
+        return f"{{\\c{hl}}}{t}{{\\c&HFFFFFF&}}" if active else t
+
     for c in chunks:
         words = c.get("words") or [{"start": c["start"], "end": c["end"], "text": c["text"]}]
         texts = [_ass_text(_caption_text(w["text"], upper)) for w in words]
@@ -257,7 +267,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             b = (words[i + 1]["start"] if i + 1 < len(words) else c["end"]) - lead
             if b - a < 0.05:
                 continue
-            shown = " ".join(f"{{\\c{hl}}}{t}{{\\c&HFFFFFF&}}" if k == i else t for k, t in enumerate(texts))
+            shown = " ".join(styled(t, words[k]["text"], k == i) for k, t in enumerate(texts))
             pop = "\\fscx110\\fscy110\\t(0,80,\\fscx100\\fscy100)" if i == 0 else ""
             lines.append(f"Dialogue: 1,{_ass_time(a)},{_ass_time(b)},Caption,,0,0,0,,"
                          f"{{\\pos({cx},{cy}){pop}}}{shown}")
@@ -746,7 +756,8 @@ class ClipRenderer:
         ass_path = work / f"{name}.ass"
         ass_path.write_text(build_ass(chunks, edited, hook, credit, text_positions(layout, cfg), cfg,
                                       banner=banner, disclosure=disclosure,
-                                      disclosure_seconds=float((profile or {}).get("disclosure_seconds", 3))),
+                                      disclosure_seconds=float((profile or {}).get("disclosure_seconds", 3)),
+                                      punch_words=ai.get("punch_words", [])),
                             encoding="utf-8")
 
         # 5. Optional music removal, then one ffmpeg render, then the cover image.

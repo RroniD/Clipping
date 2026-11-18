@@ -66,7 +66,13 @@ JUDGE_SCHEMA = {
         "is_cutscene": {"type": "boolean"},
         "layout": {"type": "string", "enum": ["split", "no_facecam", "crop"]},
         "menu_or_map": {"type": "boolean"},
-        "hook": {"type": "string", "description": "on-screen text for the first 2 s, max 8 words"},
+        "hook_options": {"type": "array", "items": {"type": "string"}, "description": "3 different hooks"},
+        "hook": {"type": "string", "description": "the best of hook_options"},
+        "title_options": {"type": "array", "items": {"type": "string"}, "description": "2 different titles"},
+        "punch_words": {"type": "array", "items": {"type": "string"},
+                        "description": "1-2 words from the transcript to highlight in the captions"},
+        "caption": {"type": "string", "description": "short post caption for TikTok (one line, no hashtags)"},
+        "story_beat": {"type": "boolean", "description": "a story mission ending / major story moment"},
         "context_line": {"type": "string", "description": "max 10 words: who/what, shown as a banner"},
         "title": {"type": "string"},
         "hashtags": {"type": "array", "items": {"type": "string"}},
@@ -74,7 +80,8 @@ JUDGE_SCHEMA = {
         "reason": {"type": "string"},
     },
     "required": ["category", "standalone", "hook_strength", "payoff", "score", "setup_start", "cut_start", "cut_end",
-                 "visual_payoff", "facecam_reaction", "is_cutscene", "menu_or_map", "layout", "hook", "context_line",
+                 "visual_payoff", "facecam_reaction", "is_cutscene", "menu_or_map", "layout", "hook_options",
+                 "hook", "title_options", "punch_words", "caption", "story_beat", "context_line",
                  "title", "hashtags", "spoiler_risk", "reason"],
     "additionalProperties": False,
 }
@@ -121,9 +128,18 @@ over the game/screen during most of the clip (we put the face on top, the game b
 the whole frame is the streamer's camera with no game (IRL / just chatting); "no_facecam" if it's \
 fullscreen gameplay without a visible webcam, or the webcam spot shows chat or something else.
 
-hook: at most 8 words of on-screen text for the first 2 seconds. It should raise a question or \
-name the stakes ("He robbed the WRONG guy", "Chat told him not to..."). No generic hooks like \
-"insane moment", no lies, no spoilers.
+hook_options: 3 DIFFERENT hooks (at most 8 words each) of on-screen text for the first 2 seconds, \
+using different angles: a question ("Why did he do THAT?"), the stakes ("5 stars and no car left"), \
+a reaction ("Chat told him not to..."). Then hook = the one most likely to stop the scroll. No \
+generic hooks like "insane moment", no lies, no spoilers.
+
+punch_words: 1-2 single words that are SAID in the transcript and carry the moment ("WASTED", \
+"run", "bro"). They get a different colour in the captions.
+
+caption: a short, natural post caption for TikTok (under 100 characters, no hashtags) that makes \
+people want to comment, e.g. "he really thought that would work".
+
+title_options: 2 different titles; title = the better one.
 
 context_line: at most 10 words that tell a stranger who and what this is, shown as a banner for \
 the rest of the clip ("Speed tries to rob a bank with his own crew"). This added context is what \
@@ -134,6 +150,12 @@ trusted his crew... big mistake") and includes the streamer's name (helps YouTub
 
 hashtags: 5-8 hashtags without '#': the streamer's name, the game, the moment type, plus 1-2 \
 broad ones (e.g. gaming, fyp).
+
+GTA streams: the clips that go viral and are SAFE to post are free-roam chaos - police chases and \
+"5 stars", crashes and physics fails, weird NPC interactions, heists going wrong, the streamer's \
+reaction to something absurd. Favour those. Story content is the opposite: never reward it.
+story_beat: true if the clip shows or discusses a story mission ending, a main-story cutscene, a \
+character's fate or a plot twist (even if the streamer is talking over it).
 
 spoiler_risk: Rockstar takes down cutscenes, story reveals, mission endings and ending videos, \
 and we never post story spoilers.
@@ -226,9 +248,24 @@ def validate(data: dict, window_len: float | None = None) -> dict:
         setup_start = min(max(0.0, setup_start), window_len)
     if cut_end - cut_start < 3:
         raise JudgeOutputError(f"cut too short or backwards: {cut_start}-{cut_end}")
+    def strings(key, n, max_words):
+        items = data.get(key) if isinstance(data.get(key), list) else []
+        out = [" ".join(str(x).split()[:max_words]) for x in items if str(x).strip()]
+        return out[:n]
+    hook_options = strings("hook_options", 3, 10)
+    if hook not in hook_options:
+        hook_options = [hook] + hook_options[:2]
+    title_options = strings("title_options", 2, 20)
+    title = str(data["title"]).strip()[:100]
+    if title and title not in title_options:
+        title_options = [title] + title_options[:1]
+    punch = [w.strip(".,!?\"'").lower() for w in strings("punch_words", 2, 1)]
     tags = data["hashtags"] if isinstance(data["hashtags"], list) else []
     tags = [str(t).strip().lstrip("#").replace(" ", "") for t in tags if str(t).strip()][:8]
-    return {**scores, "category": category, "hook": hook, "title": str(data["title"]).strip()[:100],
+    return {**scores, "category": category, "hook": hook, "title": title,
+            "hook_options": hook_options, "title_options": title_options, "punch_words": [p for p in punch if p],
+            "caption": " ".join(str(data.get("caption", "")).split())[:150],
+            "story_beat": bool(data.get("story_beat")),
             "context_line": context, "facecam_reaction": reaction,
             "is_cutscene": bool(data["is_cutscene"]), "menu_or_map": bool(data["menu_or_map"]),
             "layout": data["layout"] if data.get("layout") in ("split", "no_facecam", "crop") else None,
@@ -525,6 +562,8 @@ def warning_reasons(ai: dict | None, quiet_seconds: int | None, cfg: dict,
         reasons.append(f"AI spoiler risk: {ai['spoiler_risk']}")
     if ai and ai.get("is_cutscene"):
         reasons.append("AI thinks the frames show a cutscene")
+    if ai and ai.get("story_beat"):
+        reasons.append("AI: looks like a story mission ending / story moment (spoiler)")
     if quiet_seconds is not None and quiet_seconds >= j["cutscene_quiet_seconds"]:
         reasons.append(f"possible cutscene: {quiet_seconds} s with no speech and quiet chat")
     return reasons
@@ -626,8 +665,14 @@ def judge_all(results: list[dict], words_per_candidate: list, messages: list, ch
                 log(f"    [{i}/{len(to_judge)}] {d['peak_time']}: API error, skipped ({exc})")
 
     # The cut may have changed, so the cutscene check runs on the final cut.
+    from clipper.framecheck import story_reason
     for d, words in zip(results, words_per_candidate):
         d["quiet_stretch_seconds"] = quiet_stretch(d["start"], d["end"], words, chat_z, j["chat_quiet_z"])
+        said = " ".join(w.text for w in words or [] if w.end > d["start"] and w.start < d["end"])
+        chat_lines = [m.text for m in messages if d["start"] <= m.t <= d["end"] + 10]
+        story = story_reason(said, chat_lines, cfg)
+        if story:
+            d.setdefault("extra_warnings", []).append(story)
 
     # One comparative ranking of everything that was judged.
     judged = [(k, d) for k, d in enumerate(results) if d["ai"]]

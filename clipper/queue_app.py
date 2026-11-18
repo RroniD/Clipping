@@ -602,10 +602,15 @@ function card(c) {
     ${c.transcript ? `<div class="meta">“${esc(c.transcript.slice(0, 220))}${c.transcript.length > 220 ? "…" : ""}”</div>` : ""}
     <label>Title (for posting later)</label>
     <input value="${esc(c.title)}" onchange="saveTitle(${c.id}, this.value)">
-    ${c.hashtags.length ? `<div class="meta">${c.hashtags.map(t => "#" + esc(t)).join(" ")}
-       <a href="#" onclick="copyText('${esc((c.title + " " + c.hashtags.map(t => "#" + t).join(" ")).replace(/'/g, ""))}');return false">copy title + tags</a></div>` : ""}
+    ${(ai.title_options || []).length > 1 ? `<div class="row">${ai.title_options.map((t, k) =>
+       `<button onclick="useTitle(${c.id}, ${k})">${esc(t)}</button>`).join("")}</div>` : ""}
+    <div class="row"><button onclick="copyText(postCaption(${c.id}))">📋 Copy caption for TikTok</button></div>
+    <div class="meta">${esc(postCaption(c.id))}</div>
     <label>Hook (big text for the first 2 s)</label>
     <input value="${esc(d.hook ?? c.hook)}" oninput="edit(${c.id}, 'hook', this.value, false)">
+    ${(ai.hook_options || []).length > 1 ? `<div class="row">${ai.hook_options.map((h, k) =>
+       `<button class="${h === (d.hook ?? c.hook) ? "on" : ""}" onclick="useHook(${c.id}, ${k})">${esc(h)}</button>`).join("")}</div>
+       <div class="meta">Tap another hook, then "Re-render".</div>` : ""}
     <label>Context line (banner for the rest of the clip; makes it count as original)</label>
     <input value="${esc(d.context_line ?? c.context_line)}" oninput="edit(${c.id}, 'context_line', this.value, false)">
     <label>Campaign</label>
@@ -657,6 +662,22 @@ async function logPost(id) {
   catch (e) { say(id, e.message); }
 }
 async function redrawAfterLoad(id) { await load(); redraw(id); }
+function useHook(id, k) { const c = clips.find(x => x.id === id); edit(id, "hook", c.ai.hook_options[k]); }
+async function useTitle(id, k) {
+  const c = clips.find(x => x.id === id);
+  await saveTitle(id, c.ai.title_options[k]); await load(); redraw(id);
+}
+function postCaption(id) {
+  // What to paste under the TikTok video: the AI's caption line, the campaign's required tags /
+  // handle, and 3-5 hashtags (TikTok search reads them).
+  const c = clips.find(x => x.id === id) || {};
+  const camp = CAMPAIGNS[c.campaign] || {};
+  const tags = (c.hashtags || []).slice(0, 5).map(t => "#" + t);
+  const required = (camp.required_tags || []);
+  const extra = camp.credit ? [camp.credit] : [];
+  return [(c.ai && c.ai.caption) || c.title || "", ...required, ...extra, ...tags.filter(t => !required.includes(t))]
+    .filter(Boolean).join(" ").trim();
+}
 function copyText(text) {
   navigator.clipboard && navigator.clipboard.writeText(text).then(() => alert("Copied"), () => prompt("Copy:", text));
 }

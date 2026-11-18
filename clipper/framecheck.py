@@ -69,6 +69,21 @@ def info_texts(info: dict) -> list[str]:
     return texts
 
 
+def story_reason(transcript: str, chat_lines: list[str], cfg: dict) -> str | None:
+    """A warning when the streamer or chat says story things ("mission passed", "spoilers").
+
+    Chat spamming SPOILERS is one of the clearest signs a story moment is on screen; the
+    words list is in [launch] story_words, tune it after launch.
+    """
+    words = [w.lower() for w in cfg["launch"]["story_words"]]
+    said = [w for w in words if w in (transcript or "").lower()]
+    chat = [w for w in words if sum(w in line.lower() for line in chat_lines) >= 3]
+    if said or chat:
+        found = ", ".join(sorted(set(said + chat)))
+        return f"possible story moment: '{found}' said in the {'transcript' if said else 'chat'}"
+    return None
+
+
 # --------------------------------------------------------------------------- frame check
 
 def gray_frames(video: Path, start: float, end: float) -> np.ndarray:

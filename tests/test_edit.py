@@ -207,3 +207,13 @@ def test_dead_air_trimmed_only_at_the_edges_by_default():
     assert len(segs) == 1                     # nothing cut inside
     assert 2.5 < segs[0][0] < 3.0             # leading silence trimmed to a short breath
     assert segs[0][1] == 40.0
+
+
+def test_punch_words_get_their_own_colour():
+    cfg = load_config()
+    pos = edit.text_positions(edit.layout_for({"facecam": [0, 0, 400, 300]}), cfg)
+    chunks = edit.chunk_words(words((0.5, 0.8, "he"), (0.8, 1.2, "got"), (1.2, 1.6, "wasted!")))
+    ass = edit.build_ass(chunks, 5.0, "", "", pos, cfg, punch_words=["wasted"])
+    lines = [l for l in ass.splitlines() if l.startswith("Dialogue: 1,")]
+    assert cfg["edit"]["punch_color"] in lines[0]                    # red even before it's spoken
+    assert "\\fscx118" in lines[2] and "\\fscx118" not in lines[0]  # grows when spoken

@@ -18,7 +18,9 @@ from clipper.transcribe import Word
 CFG = load_config(None)
 GOOD = {"category": "funny", "standalone": 8, "hook_strength": 7, "payoff": 9, "score": 8,
         "visual_payoff": 7, "facecam_reaction": "big", "is_cutscene": False, "menu_or_map": False,
-        "layout": "split",
+        "layout": "split", "hook_options": ["He did NOT see that coming", "5 stars in 10 seconds", "Chat warned him"],
+        "title_options": ["Speed trusted his crew... mistake", "Worst getaway ever"], "punch_words": ["WASTED"],
+        "caption": "he really thought that would work", "story_beat": False,
         "setup_start": 5.0, "cut_start": 5.0, "cut_end": 30.0, "hook": "He did NOT see that coming",
         "context_line": "Speed trusts his crew with the money", "title": "Speed trusted his crew... mistake",
         "hashtags": ["#ishowspeed", "gta", "funny"], "spoiler_risk": "none", "reason": "Funny crash."}
@@ -264,3 +266,19 @@ def test_bad_key_stops_judging_instead_of_retrying_every_clip():
 def test_long_hook_is_shortened_not_rejected():
     out = validate({**GOOD, "hook": "one two three four five six seven eight nine ten eleven twelve"}, 40)
     assert out["hook"] == "one two three four five six seven eight nine ten"
+
+
+def test_packaging_fields_and_story_beat():
+    out = validate({**GOOD, "hook": "A brand new hook", "punch_words": ["WASTED!", "run", "extra"]}, 40)
+    assert out["hook"] == "A brand new hook" and out["hook_options"][0] == "A brand new hook"
+    assert len(out["hook_options"]) == 3 and out["punch_words"] == ["wasted", "run"]
+    assert out["caption"] == "he really thought that would work"
+    story = {**validate(GOOD, 40), "story_beat": True}
+    assert any("story" in r for r in warning_reasons(story, None, CFG))
+
+
+def test_local_story_words_warn():
+    from clipper.framecheck import story_reason
+    assert "mission passed" in story_reason("yo mission passed let's go", [], CFG)
+    assert story_reason("", ["SPOILERS", "spoilers!!", "SPOILER ALERT"], CFG)
+    assert story_reason("we crashed the car lol", ["KEKW"], CFG) is None
