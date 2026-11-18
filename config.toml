@@ -157,7 +157,8 @@ chat_quiet_z = 0.0            # "quiet chat" = chat z-score at or below this
 neutral_score = 5             # AI score used for clips that couldn't be judged
 hook_model = "claude-sonnet-5-5"  # smarter model that rewrites hooks/titles/caption for the KEPT clips
                               # (~$0.005 per clip). "" = off, Haiku's hooks are used.
-hook_top_n = 15               # how many kept clips get the smarter hooks
+hook_top_n = 10               # how many kept clips get the smarter hooks (= the 10 that get edited;
+                              # measured: ~$0.007 per clip, so ~$0.07 per VOD + ~$0.04 for Haiku)
 hook_frames = 4               # frames it sees (fewer than the first judge, to keep it cheap)
 self_check = true             # the first judge looks at each FINISHED clip (~$0.0005) and fixes a wrong layout
 rank_weight = 0.3             # how much the side-by-side ranking counts vs. each clip's own score

@@ -264,10 +264,10 @@ def main() -> None:
         d["extra_signals"] = {}
         if facecam is not None and d.get("analysis"):
             try:
-                has_face, score = reaction_score(out_dir / d["analysis"], d["window_start"], d["window_start"],
-                                                 d["window_end"], d["peak"], facecam, cfg)
+                has_face, reaction = reaction_score(out_dir / d["analysis"], d["window_start"], d["window_start"],
+                                                    d["window_end"], d["peak"], facecam, cfg)
                 if has_face:
-                    d["extra_signals"]["facecam_reaction"] = score
+                    d["extra_signals"]["facecam_reaction"] = reaction
             except Exception:
                 pass
     if cfg["audio"]["events"] and audio_events.available():

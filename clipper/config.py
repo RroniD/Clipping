@@ -248,7 +248,7 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                  'chat_quiet_z': 0.0,
                  'neutral_score': 5,
                  'hook_model': 'claude-sonnet-5-5',
-                 'hook_top_n': 15,
+                 'hook_top_n': 10,
                  'hook_frames': 4,
                  'self_check': True,
                  'rank_weight': 0.3,
