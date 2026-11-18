@@ -124,6 +124,7 @@ def test_read_new_chat_only_complete_lines(tmp_path):
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
 def test_buffer_cut_joins_pieces(tmp_path):
     cfg = load_config()
+    cfg["live"]["segment_seconds"] = 10       # this test makes 10-s pieces
     start = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=5)
     buf = live.StreamBuffer("https://www.twitch.tv/x", tmp_path / "buffer", start, cfg, "x")
     for i in range(3):   # three 10-s pieces named by local wall-clock time, like ffmpeg's strftime
