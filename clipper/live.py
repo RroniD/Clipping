@@ -758,6 +758,7 @@ def live_cfg(cfg: dict) -> dict:
     cfg["edit"]["threads"] = cfg["live"]["x264_threads"]
     cfg["edit"]["preset"] = cfg["live"]["x264_preset"]     # faster encoding: clips in the queue sooner
     cfg["edit"]["encoder"] = "auto"                        # use the graphics card's encoder if it works
+    cfg["edit"]["speaker_colors"] = False   # voice grouping adds ~10 s per clip: off live, for speed
     if not cfg["live"]["music_removal"]:
         cfg["audio"]["music_removal"] = "off"   # speed first in live mode (adds ~1 min per clip)
     if cfg["live"].get("whisper_model"):

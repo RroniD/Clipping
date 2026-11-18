@@ -298,13 +298,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     lead, hl, upper = float(e["caption_lead"]), e["caption_highlight"], e["caption_uppercase"]
     punch = {re.sub(r"[^\w']", "", p).lower() for p in punch_words if p}
 
-    def styled(t: str, raw: str, active: bool) -> str:
+    def styled(t: str, raw: str, active: bool, speaker: int = 0) -> str:
         # Punch words (the AI's 1-2 key words) are always red and grow when spoken;
-        # the word being spoken is yellow.
+        # the word being spoken is yellow; words by someone other than the streamer are cyan.
         if re.sub(r"[^\w']", "", raw).lower() in punch:
             grow = "\\fscx118\\fscy118" if active else ""
             return f"{{\\c{e['punch_color']}{grow}}}{t}{{\\c&HFFFFFF&\\fscx100\\fscy100}}"
-        return f"{{\\c{hl}}}{t}{{\\c&HFFFFFF&}}" if active else t
+        if active:
+            return f"{{\\c{hl}}}{t}{{\\c&HFFFFFF&}}"
+        if speaker:
+            return f"{{\\c{e['other_speaker_color']}}}{t}{{\\c&HFFFFFF&}}"
+        return t
 
     for c in chunks:
         words = c.get("words") or [{"start": c["start"], "end": c["end"], "text": c["text"]}]
@@ -315,7 +319,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             b = (words[i + 1]["start"] if i + 1 < len(words) else c["end"]) - lead
             if b - a < 0.05:
                 continue
-            shown = " ".join(styled(t, words[k]["text"], k == i) for k, t in enumerate(texts))
+            shown = " ".join(styled(t, words[k]["text"], k == i, words[k].get("speaker", 0))
+                             for k, t in enumerate(texts))
             pop = "\\fscx110\\fscy110\\t(0,80,\\fscx100\\fscy100)" if i == 0 else ""
             lines.append(f"Dialogue: 1,{_ass_time(a)},{_ass_time(b)},Caption,,0,0,0,,"
                          f"{{\\pos({cx},{cy}){pop}}}{shown}")
@@ -863,6 +868,14 @@ class ClipRenderer:
         # streams: most viewers of a viral clip don't speak the streamer's language).
         mode = caption_mode(streamers[streamer], d)
         trans = d.get("translated_segments") or []
+        if e["speaker_colors"] and words and not (mode == "english" and trans):
+            # Who is talking: the streamer's words stay white, other voices get their own colour.
+            from clipper.speakers import label_words
+            try:
+                for w, spk in zip(words, label_words(source, offset, duration, words)):
+                    w["speaker"] = spk
+            except Exception:
+                pass
         caption_words, small_lines = words, []
         if mode in ("english", "both") and trans:
             caption_words = translated_words(trans, start, end)
