@@ -249,3 +249,24 @@ def test_old_unique_rank_rule_is_migrated(tmp_path):
     assert (row["id"], row["status"]) == (7, "approved")      # same id, decision kept
     db.execute("INSERT INTO clips (streamer, vod_id, rank, video, start, \"end\", created_at, updated_at) "
                "VALUES ('s', 'v', 1, 'y.mp4', 0, 30, 0, 0)")    # a second clip with rank 1 is now allowed
+
+
+def test_vod_jobs_and_info(tmp_path, monkeypatch):
+    out_root = tmp_path / "out"
+    make_vod(out_root)
+    steps = []
+    monkeypatch.setattr(queue_app.VodJobs, "_step", lambda self, job, args: (steps.append(args), True)[1])
+    client = queue_app.create_app(db_path=tmp_path / "q.db", out_root=out_root, cfg=load_config(),
+                                  start_worker=False).test_client()
+    assert client.post("/api/vods", json={"url": "https://youtube.com/watch?v=x"}).status_code == 400
+    assert client.post("/api/vods", json={"url": "https://www.twitch.tv/videos/123"}).status_code == 200
+    for _ in range(50):
+        jobs = client.get("/api/jobs").get_json()
+        if jobs and jobs[0]["status"].startswith("done"):
+            break
+        time.sleep(0.05)
+    assert jobs[0]["status"].startswith("done")
+    assert steps[0] == ["run.py", "https://www.twitch.tv/videos/123"] and steps[1][:3] == ["-m", "clipper.edit", "render"]
+    assert client.get("/api/info").get_json()["phone_url"].startswith("http://")
+    html = client.get("/").get_data(as_text=True)
+    assert "Make clips from a VOD" in html and "Check setup" in html

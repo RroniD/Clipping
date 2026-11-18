@@ -24,11 +24,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import re
 import secrets
 import socket
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -311,6 +314,60 @@ class RenderWorker:
                     pass
 
 
+class VodJobs:
+    """'Make clips from a VOD' from the web page: runs run.py and then clipper.edit render as
+    separate programs, one VOD at a time, and keeps their output for the page to show.
+
+    Separate programs (not functions in this server) because they use the GPU for minutes:
+    if something goes wrong there, the review queue keeps working.
+    """
+
+    def __init__(self, out_root: Path):
+        self.out_root = out_root
+        self.items: list[dict] = []
+        self.lock = threading.Lock()
+        self.pending: queue.Queue = queue.Queue()
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def start(self, url: str) -> dict:
+        job = {"id": len(self.items) + 1, "url": url, "status": "waiting", "log": [], "started": time.time()}
+        with self.lock:
+            self.items.append(job)
+        self.pending.put(job)
+        return {k: v for k, v in job.items() if k != "log"}
+
+    def list(self) -> list[dict]:
+        with self.lock:
+            return [{**{k: v for k, v in j.items() if k != "log"}, "last": j["log"][-3:]} for j in self.items[-5:]]
+
+    def _step(self, job: dict, args: list[str]) -> bool:
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+        env["PATH"] = env.get("PATH", "") + os.pathsep + r"C:\Tools"
+        proc = subprocess.Popen([sys.executable, *args], cwd=str(PROJECT_ROOT), stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=env)
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line and "Deprecated" not in line:
+                with self.lock:
+                    job["log"].append(line[-200:])
+                    job["log"] = job["log"][-50:]
+        return proc.wait() == 0
+
+    def _loop(self) -> None:
+        from clipper.fetch import parse_vod_url
+        while True:
+            job = self.pending.get()
+            job["status"] = "finding moments"
+            if not self._step(job, ["run.py", job["url"]]):
+                job["status"] = "failed (see the last lines)"
+                continue
+            vod_id = parse_vod_url(job["url"])[1]
+            folders = [p for p in self.out_root.glob(f"*/{vod_id}") if (p / "candidates.json").exists()]
+            job["status"] = "making the clips"
+            ok = bool(folders) and self._step(job, ["-m", "clipper.edit", "render", str(folders[0])])
+            job["status"] = "done: clips are in the queue" if ok else "failed (see the last lines)"
+
+
 # --------------------------------------------------------------------------- web app
 
 def create_app(db_path: Path | None = None, out_root: Path = OUT_ROOT, cfg: dict | None = None,
@@ -325,6 +382,7 @@ def create_app(db_path: Path | None = None, out_root: Path = OUT_ROOT, cfg: dict
         added = import_clips(db, out_root)
     print(f"Review queue: {added} new clip(s) imported")
     worker = RenderWorker(db, lock, cfg, out_root) if start_worker else None
+    jobs = VodJobs(out_root)
 
     app = Flask(__name__)
 
@@ -360,6 +418,35 @@ def create_app(db_path: Path | None = None, out_root: Path = OUT_ROOT, cfg: dict
             by_clip.setdefault(p["clip_id"], []).append(p)
         return jsonify({"clips": [clip_dict(r, by_clip.get(r["id"]), q["submit_minutes"]) for r in rows],
                         "counts": {s: counts.get(s, 0) for s in STATUSES}})
+
+    @app.get("/api/info")
+    def info():
+        return jsonify({"phone_url": f"http://{lan_ip()}:{q['port']}"})
+
+    @app.get("/doctor")
+    def doctor_page():
+        """The setup checker as a simple page (the 'Check setup' button)."""
+        from clipper.doctor import report, run_checks
+        from markupsafe import escape
+        return (f"<!doctype html><meta name=viewport content='width=device-width'><title>Setup check</title>"
+                f"<body style='font:16px system-ui;background:#111;color:#eee;padding:16px'>"
+                f"<h2>Setup check</h2><pre style='white-space:pre-wrap'>{escape(report(run_checks()))}</pre>"
+                f"<p><a style='color:#8ab4f8' href='/'>Back to the clips</a></p>")
+
+    @app.post("/api/vods")
+    def add_vod():
+        """Paste a VOD link on the page -> find moments, judge, edit; clips appear in the queue."""
+        url = str((request.json or {}).get("url", "")).strip()
+        try:
+            from clipper.fetch import parse_vod_url
+            parse_vod_url(url)
+        except ValueError:
+            return jsonify({"error": "That isn't a Twitch or Kick VOD link."}), 400
+        return jsonify(jobs.start(url))
+
+    @app.get("/api/jobs")
+    def list_jobs():
+        return jsonify(jobs.list())
 
     @app.get("/api/campaigns")
     def campaigns():
@@ -519,8 +606,11 @@ PAGE = r"""<!doctype html>
   .row > * { flex:1; }
   .row span { flex:1.4; text-align:center; font-size:14px; }
   .approve { background:var(--ok); } .reject { background:var(--bad); }
+  .approve, .reject { font-size:20px; font-weight:700; padding:18px 10px; }
   .status { font-size:14px; margin-top:8px; color:var(--warn); min-height:1em; }
   .empty { text-align:center; color:var(--muted); margin-top:40px; }
+  .tools { background:var(--card); border-radius:12px; padding:12px; margin-bottom:18px; }
+  #qr { background:#fff; padding:8px; display:inline-block; border-radius:8px; }
   a { color:#8ab4f8; }
 </style></head>
 <body>
@@ -529,7 +619,19 @@ PAGE = r"""<!doctype html>
   <button data-tab="approved">Approved</button>
   <button data-tab="rejected">Rejected</button>
 </header>
+<main>
+  <details class="tools" id="tools">
+    <summary>➕ Make clips from a VOD · 📱 Open on your phone · 🩺 Check setup</summary>
+    <label>Paste a Twitch VOD link (only streamers on your list)</label>
+    <div class="row"><input id="vodurl" placeholder="https://www.twitch.tv/videos/..."><button onclick="addVod()">Make clips</button></div>
+    <div class="meta" id="jobs"></div>
+    <label>Open this page on your phone (same Wi-Fi): scan the code or type the address</label>
+    <div id="qr"></div> <div class="meta" id="phoneurl"></div>
+    <p><a href="/doctor">🩺 Check setup</a> (tells you what's missing and how to fix it)</p>
+  </details>
+</main>
 <main id="list"></main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
 const STEP = __TRIM_STEP__;
 let CAMPAIGNS = {};
@@ -731,6 +833,30 @@ setInterval(() => { if (clips.some(c => c.rendering)) load(); }, 3000);
 // Keep the submit countdowns current.
 setInterval(() => { if (clips.some(c => c.submit_deadline)) clips.filter(c => c.submit_deadline).forEach(c => redraw(c.id)); }, 60000);
 api("/api/campaigns").then(c => { CAMPAIGNS = c; }).catch(() => {}).finally(load);
+
+// Tools: phone QR code, "make clips from a VOD" and its progress.
+api("/api/info").then(i => {
+  document.getElementById("phoneurl").textContent = i.phone_url;
+  if (window.QRCode) new QRCode(document.getElementById("qr"), {text: i.phone_url, width: 140, height: 140});
+}).catch(() => {});
+async function addVod() {
+  const url = document.getElementById("vodurl").value.trim();
+  try { await api("/api/vods", {url}); document.getElementById("vodurl").value = ""; showJobs(); }
+  catch (e) { alert(e.message); }
+}
+async function showJobs() {
+  const jobs = await api("/api/jobs").catch(() => []);
+  document.getElementById("jobs").innerHTML = jobs.map(j =>
+    `<b>${esc(j.status)}</b> · ${esc(j.url)}<br><small>${j.last.map(esc).join("<br>")}</small>`).join("<hr>");
+  if (jobs.some(j => !j.status.startsWith("done") && !j.status.startsWith("failed"))) {
+    document.getElementById("tools").open = true;
+    setTimeout(showJobs, 4000);
+  }
+  if (jobs.some(j => j.status.startsWith("done"))) load();
+}
+showJobs();
+// New clips (live mode, VOD jobs) show up by themselves.
+setInterval(() => { if (tab === "pending" && !Object.keys(draft).length) load(); }, 30000);
 </script>
 </body></html>
 """

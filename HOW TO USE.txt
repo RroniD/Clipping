@@ -1,0 +1,66 @@
+AUTOCLIPPER - HOW TO USE (no tech skills needed)
+================================================
+
+WHAT IT DOES
+  It watches the streamers on your list, finds the moments worth clipping, cuts them into
+  vertical TikTok/Shorts/Reels videos with captions, and puts them in your REVIEW QUEUE.
+  Nothing is ever posted by itself: you approve each clip and post it yourself.
+
+
+EVERY DAY
+  1. Double-click "AutoClipper" on your desktop.
+     Two black windows open (keep them open) and the review queue opens in your browser.
+  2. On your phone (same Wi-Fi): open the review queue. Easiest: on the laptop's queue page tap
+     "Open on your phone" and scan the QR code with your phone camera.
+  3. When a clip is ready your phone buzzes (ntfy app, see SETUP). Open the queue and:
+       - watch the clip
+       - if it has a yellow warning box, watch it to the end: it may be a spoiler -> reject it
+       - tap a different hook or title if you like one better, then "Re-render"
+       - wrong picture on top? change "Layout", then "Re-render"
+       - press APPROVE (or REJECT)
+  4. After approving: a green timer shows how long you have to post. Tap "Download", tap
+     "Copy caption", post it on TikTok (and YouTube / Instagram if the campaign pays for them),
+     then paste the post link into "Posted it?" so you can track it.
+  5. To stop: close the two black windows.
+
+
+A STREAM YOU MISSED (VOD)
+  Option A: on the queue page tap "Make clips from a VOD", paste the Twitch link, tap
+            "Make clips". The clips appear in the queue by themselves (20-60 minutes).
+  Option B: double-click "Process a VOD.bat" in the Clipping folder and paste the link.
+
+
+LAUNCH DAY (GTA 6, November 19)
+  - Make sure the streamers you clip are on your list (see SETUP, step 4).
+  - Start AutoClipper BEFORE they go live and leave the laptop plugged in, with sleep turned off
+    (Settings > System > Power > Screen and sleep > Never, while plugged in).
+  - Clips arrive 1-3 minutes after each moment. Post the good ones FAST: early clips win.
+  - Spoiler rule: anything with a yellow warning (cutscene, story mission, "spoilers" in chat)
+    -> reject unless you are 100% sure it's free-roam gameplay. Rockstar takes those down.
+
+
+SETUP (once)
+  1. Double-click "Check setup.bat". It tells you, in plain words, what's missing and how to fix it.
+  2. Phone notifications: install the "ntfy" app, tap +, and subscribe to the topic that
+     "Check setup" (or: python -m clipper.notify --setup) shows you.
+  3. Phone can't open the queue? Your home Wi-Fi must be "Private": Settings > Network &
+     internet > Wi-Fi > your network > Network profile type > Private. When Windows asks about
+     Python and the firewall, click Allow.
+  4. Streamers you're allowed to clip go in streamers.toml (or ask Claude to add them).
+     Campaign rules (tags, disclosure, length) go in campaigns.toml (or ask Claude).
+
+
+WHEN SOMETHING BREAKS
+  - First: double-click "Check setup.bat" and do what it says.
+  - Then: double-click "Update AutoClipper.bat" (gets the newest version) and try again.
+  - A black window shows red text / closed by itself: take a photo of the last lines and send it
+    to Claude.
+  - Clips feel wrong (cut too early/late, wrong layout, bad hook): tell Claude which clip and
+    what's wrong. Your approve/reject decisions also teach the tool over time.
+  - The laptop went to sleep or the internet dropped: live mode reconnects by itself. If no clips
+    come for a long time while the streamer is live, close both windows and start again.
+
+
+COSTS
+  The AI judge costs about 1-5 cents per stream (Haiku). Everything else is free.
+  Set a monthly limit at platform.claude.com > Billing so it can never surprise you.
