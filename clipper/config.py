@@ -270,7 +270,7 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                 'caption_highlight': '&H00FFFF&',
                 'caption_lead': 0.1,
                 'punch_color': '&H3C3CFF&',
-                'speaker_colors': True,
+                'speaker_colors': False,
                 'other_speaker_color': '&HFFFF00&',
                 'caption_y_no_facecam': 0.62,
                 'caption_y_crop': 0.62,

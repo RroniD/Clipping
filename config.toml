@@ -187,7 +187,9 @@ caption_uppercase = true
 caption_highlight = "&H00FFFF&"   # the word being spoken turns this colour (yellow; ASS colours are BGR)
 caption_lead = 0.1         # captions appear this much before the word is spoken (feels in sync)
 punch_color = "&H3C3CFF&"  # the AI's 1-2 "punch words" get this colour (red) and grow a little
-speaker_colors = true      # other people talking (co-streams, IRL friends) get their own caption colour
+speaker_colors = false     # EXPERIMENTAL: other voices get their own caption colour. Off: in fast
+                           # gaming banter voices switch mid-sentence and it couldn't separate them
+                           # (tested on a Speed + teammates clip), and it adds ~35 s per clip.
 other_speaker_color = "&HFFFF00&"   # cyan (ASS colours are BGR)
 caption_y_no_facecam = 0.62   # caption height as a share of the screen (0 = top)
 caption_y_crop = 0.62

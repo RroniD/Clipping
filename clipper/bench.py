@@ -57,20 +57,32 @@ def prepare(vod_ids: list[str], streamer: str = "ishowspeed") -> None:
         print(f"{vod}: ready", flush=True)
 
 
-def human_moments(clips: list[dict], cfg: dict, n: int = 20, merge: float = 30) -> list[dict]:
-    """The top-n most-viewed viewer-clip moments. Clips of the same moment (within `merge` s)
-    are merged: their views add up and the most-viewed clip's bounds are kept."""
+def human_moments(clips: list[dict], cfg: dict, n: int = 20, merge: float = 30, min_clippers: int = 3) -> list[dict]:
+    """The answer key: moments that SEVERAL viewers clipped (consensus), most-clipped first.
+
+    Why not simply "the most-viewed clips"? On a big channel most viewer clips are personal
+    (a few dozen views, titles like "ii"), and views depend on who shared a clip. Many different
+    people clipping the same 30 seconds is the clearest sign a moment was clip-worthy.
+    Clips within `merge` s of each other are one moment; it needs `min_clippers` clips (lowered
+    to 2 if that leaves fewer than 10 moments). Its time is the median of the clips' moments.
+    """
     centre = cfg["signals"]["viewer_clip_center"]
-    moments: list[dict] = []
-    for c in sorted(clips, key=lambda c: -c.get("views", 0)):
+    groups: list[list[dict]] = []
+    for c in sorted(clips, key=lambda c: c["vod_offset"] + centre * c["duration"]):
         t = c["vod_offset"] + centre * c["duration"]
-        twin = next((m for m in moments if abs(m["t"] - t) <= merge), None)
-        if twin:
-            twin["views"] += c.get("views", 0)
+        if groups and t - (groups[-1][-1]["vod_offset"] + centre * groups[-1][-1]["duration"]) <= merge:
+            groups[-1].append(c)
         else:
-            moments.append({"t": t, "views": c.get("views", 0), "start": c["vod_offset"],
-                            "end": c["vod_offset"] + c["duration"]})
-    return sorted(moments, key=lambda m: -m["views"])[:n]
+            groups.append([c])
+    moments = []
+    for g in groups:
+        ts = [c["vod_offset"] + centre * c["duration"] for c in g]
+        best = max(g, key=lambda c: c.get("views", 0))
+        moments.append({"t": float(np.median(ts)), "clippers": len(g), "views": sum(c.get("views", 0) for c in g),
+                        "start": best["vod_offset"], "end": best["vod_offset"] + best["duration"]})
+    need = min_clippers if sum(m["clippers"] >= min_clippers for m in moments) >= 10 else 2
+    moments = [m for m in moments if m["clippers"] >= need]
+    return sorted(moments, key=lambda m: (-m["clippers"], -m["views"]))[:n]
 
 
 class VodData:
@@ -105,7 +117,7 @@ def evaluate(vod: VodData, cfg: dict, lag: int) -> dict:
     score = combine(z, cfg)
     peaks = pick_peaks(score, cfg["peaks"]["threshold"], cfg["peaks"]["min_gap_seconds"], 40)
     truth = vod.truth
-    total_views = sum(m["views"] for m in truth) or 1
+    total_weight = sum(m.get("clippers", 1) for m in truth) or 1
 
     def hits(k):
         found = [m for m in truth if any(abs(p - m["t"]) <= HIT_SECONDS for p in peaks[:k])]
@@ -121,7 +133,8 @@ def evaluate(vod: VodData, cfg: dict, lag: int) -> dict:
     unclipped = [p for p in peaks[:15] if not any(abs(p - t) <= HIT_SECONDS for t in vod.all_clip_times)]
     return {"vod": vod.id, "recall15": len(h15) / len(truth) if truth else 0.0,
             "recall40": len(h40) / len(truth) if truth else 0.0,
-            "views15": sum(m["views"] for m in h15) / total_views,
+            # Share of all the viewers' clipping effort we caught: a moment 12 people clipped counts 12x.
+            "views15": sum(m.get("clippers", 1) for m in h15) / total_weight,
             "start_err": float(np.median(errs_s)) if errs_s else None,
             "end_err": float(np.median(errs_e)) if errs_e else None,
             "unclipped15": len(unclipped), "unclipped_peaks": unclipped[:5], "n_truth": len(truth)}
@@ -212,9 +225,9 @@ def run(streamer: str = "ishowspeed", apply: bool = True) -> str:
     improved = test_after > test_before + 0.01
 
     lines = ["AUTOCLIPPER BENCHMARK", "=====================", "",
-             f"Answer key: the 20 most-viewed moments that Twitch viewers clipped, per VOD ({len(vods)} VODs of {streamer}).",
+             f"Answer key: up to 20 moments per VOD that 3+ different Twitch viewers clipped (most-clipped first) ({len(vods)} VODs of {streamer}).",
              "The detector does NOT see the viewer clips. A 'hit' = our moment within 20 s of theirs.", "",
-             "VOD          top-15 hits  top-40 hits  views covered by top 15   start/end error   our top-15 nobody clipped"]
+             "VOD          top-15 hits  top-40 hits  clippers covered by top 15   start/end error   our top-15 nobody clipped"]
 
     def row(r):
         se = "-" if r["start_err"] is None else f"{r['start_err']:+.0f}s/{r['end_err']:+.0f}s"

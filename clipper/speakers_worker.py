@@ -20,10 +20,14 @@ def main() -> None:
     import torchaudio
     from speechbrain.inference.speaker import EncoderClassifier
 
+    from speechbrain.utils.fetching import LocalStrategy
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # LocalStrategy.COPY: Windows doesn't allow normal users to create symlinks, which
+    # SpeechBrain uses by default for its downloaded model files.
     model = EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb",
                                            savedir=str(Path.home() / "panns_data" / "ecapa"),
-                                           run_opts={"device": device})
+                                           run_opts={"device": device}, local_strategy=LocalStrategy.COPY)
     wav, sr = torchaudio.load(job["wav"])
     wav = wav.mean(dim=0)
     if sr != 16000:
