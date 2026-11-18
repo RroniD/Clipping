@@ -270,3 +270,21 @@ def test_vod_jobs_and_info(tmp_path, monkeypatch):
     assert client.get("/api/info").get_json()["phone_url"].startswith("http://")
     html = client.get("/").get_data(as_text=True)
     assert "Make clips from a VOD" in html and "Check setup" in html
+
+
+def test_duplicate_rows_are_cleaned_and_blocked(tmp_path):
+    """Copies of the same clip (made by an old program version) are removed; decisions are kept."""
+    out_root = tmp_path / "out"
+    make_vod(out_root)
+    db = queue_app.connect(tmp_path / "q.db")
+    queue_app.import_clips(db, out_root)
+    db.execute("DROP INDEX IF EXISTS clips_one_per_video")
+    for _ in range(3):   # what the old program did on every page refresh
+        db.execute("INSERT INTO clips (streamer, vod_id, rank, video, start, \"end\", created_at, updated_at) "
+                   "SELECT streamer, vod_id, rank, video, start, \"end\", 0, 0 FROM clips WHERE rank=1 LIMIT 1")
+    db.execute("UPDATE clips SET status='approved' WHERE id=(SELECT MAX(id) FROM clips)")  # a decided copy
+    db.commit()
+    db.close()
+    db = queue_app.connect(tmp_path / "q.db")
+    rows = db.execute("SELECT rank, status FROM clips ORDER BY id").fetchall()
+    assert [(r["rank"], r["status"]) for r in rows] == [(1, "pending"), (2, "pending"), (1, "approved")]

@@ -36,6 +36,7 @@ import threading
 import time
 from pathlib import Path
 
+from clipper import settings_files
 from clipper.config import PROJECT_ROOT, load_campaigns, load_config
 
 OUT_ROOT = PROJECT_ROOT / "out"
@@ -136,6 +137,14 @@ def connect(db_path: Path) -> sqlite3.Connection:
     for name, kind in EXTRA_COLUMNS.items():
         if name not in have:
             db.execute(f"ALTER TABLE clips ADD COLUMN {name} {kind}")
+    # One row per video file. An OLD copy of this program that was still running after the
+    # one-clip-per-rank rule was removed kept adding copies of every clip (151 rows for 16
+    # clips). Remove extra copies nobody touched, then let the database itself refuse duplicates.
+    db.execute("""DELETE FROM clips WHERE id NOT IN (SELECT MIN(id) FROM clips GROUP BY video)
+                  AND status='pending' AND version=0 AND id NOT IN (SELECT clip_id FROM events)
+                  AND id NOT IN (SELECT clip_id FROM posts)""")
+    if not db.execute("SELECT 1 FROM clips GROUP BY video HAVING COUNT(*) > 1").fetchone():
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS clips_one_per_video ON clips (video)")
     db.commit()
     return db
 
@@ -448,6 +457,39 @@ def create_app(db_path: Path | None = None, out_root: Path = OUT_ROOT, cfg: dict
     def list_jobs():
         return jsonify(jobs.list())
 
+    @app.get("/api/settings")
+    def settings():
+        from clipper.config import load_streamers
+        return jsonify({"streamers": {n: s.get("platform", "twitch") for n, s in load_streamers().items()},
+                        "campaigns": list(load_campaigns())})
+
+    @app.post("/api/streamers")
+    def add_streamer():
+        """Add a streamer to the allow-list (hard rule 3: only streamers who allow clipping)."""
+        body = request.json or {}
+        name = str(body.get("name", "")).strip().lower().lstrip("@")
+        platform = body.get("platform", "twitch")
+        if not body.get("allowed"):
+            return jsonify({"error": "Only add streamers who allow or pay for clipping (tick the box)."}), 400
+        try:
+            settings_files.add_streamer(name, platform)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"ok": True})
+
+    @app.post("/api/streamers/remove")
+    def remove_streamer():
+        settings_files.remove_streamer(str((request.json or {}).get("name", "")).strip().lower())
+        return jsonify({"ok": True})
+
+    @app.post("/api/campaigns")
+    def add_campaign():
+        try:
+            key = settings_files.add_campaign(request.json or {})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"ok": True, "id": key})
+
     @app.get("/api/campaigns")
     def campaigns():
         """Campaign profiles from campaigns.toml (what the picker offers)."""
@@ -628,6 +670,28 @@ PAGE = r"""<!doctype html>
     <label>Open this page on your phone (same Wi-Fi): scan the code or type the address</label>
     <div id="qr"></div> <div class="meta" id="phoneurl"></div>
     <p><a href="/doctor">🩺 Check setup</a> (tells you what's missing and how to fix it)</p>
+  </details>
+  <details class="tools">
+    <summary>⚙ Streamers and campaigns</summary>
+    <label>Streamers on your list (live mode watches these; restart AutoClipper after changes)</label>
+    <div class="meta" id="streamers"></div>
+    <div class="row"><input id="sname" placeholder="channel name, e.g. kaicenat">
+      <select id="splat"><option>twitch</option><option>kick</option></select></div>
+    <label><input type="checkbox" id="sallowed" style="width:auto"> This streamer allows or pays for clipping</label>
+    <div class="row"><button onclick="addStreamer()">Add streamer</button></div>
+    <label>Add a campaign (copy the numbers and tags from the campaign's rules page)</label>
+    <input id="cname" placeholder="Campaign name">
+    <input id="cstreamer" placeholder="Streamer (channel name, optional)">
+    <input id="ctags" placeholder="Required tags/handles, e.g. #kaicenat @kaicenat">
+    <input id="ccredit" placeholder="Credit line to show on the video (optional)">
+    <input id="cdisc" placeholder="Disclosure text, e.g. #ad (only if the rules ask)">
+    <div class="row"><input id="cmax" placeholder="Max seconds (e.g. 60)"><input id="crate" placeholder="$ per 1000 views"></div>
+    <input id="curl" placeholder="Link to the rules page">
+    <label><input type="checkbox" id="ctiktok" style="width:auto" checked> TikTok
+      <input type="checkbox" id="cyoutube" style="width:auto"> YouTube
+      <input type="checkbox" id="cinstagram" style="width:auto"> Instagram</label>
+    <div class="row"><button onclick="addCampaign()">Save campaign</button></div>
+    <div class="meta" id="campaigns"></div>
   </details>
 </main>
 <main id="list"></main>
@@ -855,6 +919,35 @@ async function showJobs() {
   if (jobs.some(j => j.status.startsWith("done"))) load();
 }
 showJobs();
+
+async function showSettings() {
+  const s = await api("/api/settings").catch(() => ({streamers: {}, campaigns: []}));
+  document.getElementById("streamers").innerHTML = Object.entries(s.streamers).map(([n, p]) =>
+    `${esc(n)} (${esc(p)}) <a href="#" onclick="removeStreamer('${esc(n)}');return false">remove</a>`).join("<br>") || "none yet";
+  document.getElementById("campaigns").innerHTML = s.campaigns.length ? "Saved campaigns: " + s.campaigns.map(esc).join(", ") : "";
+}
+async function addStreamer() {
+  try {
+    await api("/api/streamers", {name: val("sname"), platform: val("splat"),
+                                 allowed: document.getElementById("sallowed").checked});
+    document.getElementById("sname").value = ""; showSettings();
+  } catch (e) { alert(e.message); }
+}
+async function removeStreamer(name) {
+  if (!confirm("Remove " + name + " from your list?")) return;
+  await api("/api/streamers/remove", {name}); showSettings();
+}
+function val(id) { return document.getElementById(id).value.trim(); }
+async function addCampaign() {
+  try {
+    await api("/api/campaigns", {name: val("cname"), streamer: val("cstreamer"), required_tags: val("ctags"),
+      credit: val("ccredit"), disclosure: val("cdisc"), max_seconds: val("cmax"), rate_per_1000: val("crate"),
+      rules_url: val("curl"), tiktok: document.getElementById("ctiktok").checked,
+      youtube: document.getElementById("cyoutube").checked, instagram: document.getElementById("cinstagram").checked});
+    CAMPAIGNS = await api("/api/campaigns"); showSettings(); alert("Campaign saved");
+  } catch (e) { alert(e.message); }
+}
+showSettings();
 // New clips (live mode, VOD jobs) show up by themselves.
 setInterval(() => { if (tab === "pending" && !Object.keys(draft).length) load(); }, 30000);
 </script>
