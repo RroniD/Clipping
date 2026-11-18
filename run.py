@@ -350,6 +350,9 @@ def main() -> None:
             if d["kept"]:
                 choose_layout(d, out_dir / d["analysis"] if d.get("analysis") else None,
                               d["window_start"], facecam, cfg)
+        from clipper.layoutcheck import vote_facecam
+        vote_facecam([d for d in results if d["kept"]],
+                     lambda d: (out_dir / d["analysis"], d["window_start"]) if d.get("analysis") else None, cfg)
         changed = sum(1 for d in results if d["kept"] and d.get("layout") != streamer_cfg.get("layout", "split"))
         print(f"    layout: {changed} kept clip(s) need a different layout than the streamer's default")
     flagged = sum(d["warning"] for d in results if d["kept"])

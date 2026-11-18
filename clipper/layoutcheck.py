@@ -108,6 +108,77 @@ def local_layout(frames: np.ndarray, facecam: tuple[float, float, float, float] 
     return "no_facecam", reason, stats
 
 
+def find_facecam(frames: np.ndarray, cfg: dict) -> tuple[tuple[float, float, float, float], float] | None:
+    """Look for the webcam box anywhere along the edges of the frame: (box, skin share) or None.
+
+    Streamers move their webcam overlay between scenes and streams, so the box measured once in
+    streamers.toml is often in the wrong place. Webcam overlays are almost always 16:9-ish
+    rectangles touching a side or corner. We try a grid of those and keep the one that looks most
+    like a webcam: lots of skin-coloured pixels in a steady picture (the same test as above).
+    """
+    lc = cfg["layout"]
+    best = None
+    # "Steady" relative to this clip: an energetic streamer moves a lot, but the game in the middle
+    # of the screen still moves more. So the box may move up to 80% as much as the game does.
+    game_motion = region_stats(frames, CENTER)["motion"]
+    max_motion = max(lc["box_max_motion"], 0.8 * game_motion)
+    for w in (0.18, 0.22, 0.26, 0.30):
+        h = w * (W / H) * (9 / 16)   # height of a 16:9 box w wide, as a share of the frame height
+        for x in (0.0, 1 - w):   # left or right edge: a centred "face" is usually a game character
+            for y in np.arange(0.0, 1 - h + 1e-6, 0.05):
+                box = (x, float(y), w, h)
+                s = region_stats(frames, box)
+                if s["skin"] >= lc["face_skin"] and s["motion"] <= max_motion:
+                    score = s["skin"] - 0.005 * s["motion"]
+                    if best is None or score > best[1]:
+                        best = (box, score)
+    if best is None:
+        return None
+    return (tuple(round(v, 3) for v in best[0]), round(best[1], 3))
+
+
+def is_face_box(frames: np.ndarray, box, cfg: dict) -> bool:
+    """Does this box look like a webcam with a face in this clip (same rule as find_facecam)?"""
+    lc = cfg["layout"]
+    s = region_stats(frames, box)
+    max_motion = max(lc["box_max_motion"], 0.8 * region_stats(frames, CENTER)["motion"])
+    return s["skin"] >= lc["face_skin"] and s["motion"] <= max_motion
+
+
+def vote_facecam(results: list[dict], video_of, cfg: dict) -> int:
+    """Streamers keep their webcam in one place most of a stream. Take the box found most often
+    across this VOD's clips and re-check every clip with it; clips where it holds a face get
+    "split" with that box, the others stay as they are. Returns how many clips use it.
+    video_of(d) -> (video path, video start) for a clip, or None."""
+    found = [tuple(d["facecam_box"]) for d in results if d.get("facecam_box")]
+    if len(found) < 2:
+        return 0
+    from collections import Counter
+    # Boxes within 0.05 of each other count as the same spot.
+    key = lambda b: (round(b[0] / 0.05), round(b[1] / 0.05))   # noqa: E731
+    winner_key, _ = Counter(key(b) for b in found).most_common(1)[0]
+    box = max((b for b in found if key(b) == winner_key), key=lambda b: b[2])
+    used = 0
+    for d in results:
+        src = video_of(d)
+        if d.get("layout") is None or src is None:
+            continue
+        if d["layout"] == "split" and not d.get("facecam_box"):
+            continue   # the measured box (streamers.toml) already shows the face: keep it
+        try:
+            frames = rgb_frames(src[0], d["start"] - src[1], d["end"] - src[1])
+        except Exception:
+            continue
+        if len(frames) and is_face_box(frames, box, cfg):
+            d["facecam_box"], d["layout"] = list(box), "split"
+            d["layout_reason"] = "webcam at the streamer's usual spot in this stream"
+            used += 1
+        elif d.get("facecam_box") and key(tuple(d["facecam_box"])) != winner_key:
+            d.pop("facecam_box", None)        # an odd one-off spot: don't trust it
+            d["layout"], d["layout_reason"] = "no_facecam", "webcam not at its usual spot: safe layout"
+    return used
+
+
 def reaction_score(video: Path, video_start: float, window_start: float, window_end: float, peak: float,
                    facecam, cfg: dict, fps: int = 4) -> tuple[bool, float]:
     """How big the streamer's visible reaction is around the peak: (face_in_box, score).
@@ -140,15 +211,26 @@ def choose_layout(d: dict, video: Path | None, video_start: float, facecam, cfg:
     video: a copy of the moment (run.py's 360p analysis clip, or live mode's own recording)
     that starts at VOD second `video_start`."""
     local = None
+    found = None
     if video is not None:
         try:
             frames = rgb_frames(video, d["start"] - video_start, d["end"] - video_start)
             if len(frames):
                 layout, reason, _ = local_layout(frames, facecam, cfg)
                 local = (layout, reason)
+                if layout != "split" and cfg["layout"]["find_facecam"]:
+                    # The measured box shows no face: maybe the webcam moved. Look for it.
+                    found = find_facecam(frames, cfg)
+                    if found:
+                        local = ("split", f"webcam found at a different spot ({reason})")
         except Exception:
             local = None   # couldn't read frames: fall back to the AI / the default
-    d["layout"], d["layout_reason"] = combine(local, (d.get("ai") or {}).get("layout"), facecam is not None)
+    d["layout"], d["layout_reason"] = combine(local, (d.get("ai") or {}).get("layout"),
+                                              facecam is not None or found is not None)
+    if found and d["layout"] == "split":
+        d["facecam_box"] = list(found[0])     # fractions of the frame; the editor uses this box
+    else:
+        d.pop("facecam_box", None)
 
 
 def combine(local: tuple[str, str] | None, ai: str | None, has_facecam: bool) -> tuple[str, str]:

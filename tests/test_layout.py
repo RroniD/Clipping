@@ -86,3 +86,38 @@ def test_rgb_frames_from_a_video(tmp_path):
                     "-t", "6", "-c:v", "libx264", "-preset", "ultrafast", str(video)], check=True)
     f = layoutcheck.rgb_frames(video, 1, 5, n=4)
     assert f.shape[1:] == (180, 320, 3) and 3 <= len(f) <= 5
+
+
+def _frames_with_cam(x0, y0, w, h, n=6, seed=1):
+    rng = np.random.default_rng(seed)
+    f = rng.integers(0, 255, size=(n, 180, 320, 3)).astype(np.uint8)
+    f[..., 2] = 255
+    f[..., 0] //= 3
+    ys, ye, xs, xe = int(y0 * 180), int((y0 + h) * 180), int(x0 * 320), int((x0 + w) * 320)
+    for i in range(n):
+        f[i, ys:ye, xs:xe] = (np.array(SKIN) + rng.integers(-5, 5, size=(ye - ys, xe - xs, 3))).clip(0, 255)
+    return f
+
+
+def test_find_facecam_finds_a_moved_webcam():
+    cam = _frames_with_cam(0.0, 0.62, 0.27, 0.27)
+    box, score = layoutcheck.find_facecam(cam, CFG)
+    assert box[0] == 0.0 and 0.5 <= box[1] <= 0.7 and score > 0.3
+    assert layoutcheck.find_facecam(frames(), CFG) is None          # no webcam anywhere
+
+
+def test_vote_uses_the_streams_usual_spot(monkeypatch):
+    cam = _frames_with_cam(0.0, 0.6, 0.3, 0.3)
+    monkeypatch.setattr(layoutcheck, "rgb_frames", lambda *a, **k: cam)
+    results = [{"start": 0, "end": 30, "layout": "split", "facecam_box": [0.0, 0.6, 0.3, 0.3]},
+               {"start": 0, "end": 30, "layout": "split", "facecam_box": [0.0, 0.6, 0.3, 0.3]},
+               {"start": 0, "end": 30, "layout": "split", "facecam_box": [0.41, 0.1, 0.18, 0.18]},   # odd one
+               {"start": 0, "end": 30, "layout": "no_facecam"}]
+    used = layoutcheck.vote_facecam(results, lambda d: ("v.mp4", 0.0), CFG)
+    assert used == 4 and all(d["facecam_box"] == [0.0, 0.6, 0.3, 0.3] for d in results)
+
+
+def test_split_layout_puts_the_hook_below_the_face():
+    from clipper import edit
+    p = edit.text_positions(edit.layout_for({"facecam": [0, 0, 400, 300]}), CFG)
+    assert p["hook"] > edit.facecam_height(CFG)

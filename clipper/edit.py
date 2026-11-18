@@ -187,6 +187,10 @@ def text_positions(layout: Layout, cfg: dict) -> dict[str, int]:
         caption_y = int(OUT_H * e["caption_y_crop"])
     caption_y = min(max(caption_y, e["safe_top"] + 60), e["safe_bottom"] - 60)
     hook_y = min(max(int(OUT_H * e["hook_y"]), e["safe_top"] + 40), e["safe_bottom"] - 40)
+    if layout.mode == "split":
+        # With the face on top, text at the usual height would sit on the streamer's face.
+        # Put the hook/banner just below the captions, at the top of the game picture instead.
+        hook_y = min(facecam_height(cfg) + 130, e["safe_bottom"] - 40)
     return {"caption": caption_y, "hook": hook_y, "x": (e["safe_left"] + e["safe_right"]) // 2,
             "disclosure": hook_y + 90, "credit_x": e["safe_left"], "credit_y": e["safe_bottom"]}
 
@@ -750,7 +754,11 @@ def choose_layouts(out_dir: Path, cfg: dict) -> list[tuple[int, str | None, str,
         old = d.get("layout")
         video = out_dir / d["analysis"] if d.get("analysis") else None
         choose_layout(d, video, d.get("window_start", d["start"]), facecam, cfg)
-        changes.append((d["rank"], old, d["layout"], d["layout_reason"]))
+        changes.append([d["rank"], old, None, None, d])
+    from clipper.layoutcheck import vote_facecam
+    kept = [c[4] for c in changes]
+    vote_facecam(kept, lambda d: (out_dir / d["analysis"], d["window_start"]) if d.get("analysis") else None, cfg)
+    changes = [(r, old, d["layout"], d["layout_reason"]) for r, old, _, _, d in changes]
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return changes
 
@@ -813,7 +821,12 @@ class ClipRenderer:
         # Layout: one you chose (queue / --layout) wins; else the per-clip choice from run.py
         # (clipper.layoutcheck + the AI); else the streamer's default.
         auto = d.get("layout") if cfg["layout"]["auto"] else None
-        layout = streamer_layout(streamers[streamer], layout_mode or auto)
+        if (layout_mode or auto) == "split" and d.get("facecam_box") and cfg["layout"]["auto"]:
+            # The webcam was found somewhere else than the measured box (clipper.layoutcheck):
+            # use that box for the face, and the whole picture (centre) for the game.
+            layout = Layout(mode="split", gameplay=(0.0, 0.0, 1.0, 1.0), facecam=tuple(d["facecam_box"]))
+        else:
+            layout = streamer_layout(streamers[streamer], layout_mode or auto)
         if layout_mode and layout_mode != auto:
             layout_reason = "picked by hand"
         elif auto:

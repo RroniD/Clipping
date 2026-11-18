@@ -39,7 +39,9 @@ streamer's face shows something else (chat, an empty corner, game menus).
 - captions_ok: false if the captions sit on top of the important action.
 - hook_readable: the text in the first frame is readable and not covering the action.
 - first_frame_score: 1-10, would this first frame make someone stop scrolling.
-- problems: short plain-English notes for the human (empty if fine).
+- problems: at most 2 short notes, ONLY for things that would make a viewer swipe away (a cut-off \
+face, a blank or menu screen, the key moment hidden by text). Captions sitting over the game are \
+normal and NOT a problem. Empty list if fine.
 - fix_layout: the layout that would fix a face/crop problem: "split" (face on top, game below), \
 "no_facecam" (the whole game picture with a blurred background), "crop" (a camera filling the \
 screen), or "none" if the layout is fine. Be conservative: "none" unless clearly wrong."""
