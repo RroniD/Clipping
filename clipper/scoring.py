@@ -62,6 +62,22 @@ def combine(z: dict[str, np.ndarray], cfg: dict) -> np.ndarray:
     return smooth(score, int(s["smooth_seconds"]))
 
 
+def score_signals(raw: dict[str, np.ndarray], z: dict[str, np.ndarray], cfg: dict) -> np.ndarray:
+    """The detector's per-second score.
+
+    [scoring] scorer = "learned": a model trained on what viewers clipped (learned.py) scores the
+    chat + audio signals; other signals (viewer clips) are added with their hand weights.
+    scorer = "hand" (or no saved model, or no chat): the hand-weighted formula above.
+    """
+    if cfg["scoring"].get("scorer", "hand") == "learned":
+        from clipper import learned
+        s = learned.score(raw, cfg)
+        if s is not None:
+            rest = {k: v for k, v in z.items() if k not in learned.REPLACES}
+            return s + combine(rest, cfg) if rest else s
+    return combine(z, cfg)
+
+
 # --------------------------------------------------------------------------- peaks
 
 def pick_peaks(score: np.ndarray, threshold: float, min_gap: int, top_n: int) -> list[int]:
@@ -135,16 +151,19 @@ def clamp_length(start: float, end: float, peak: float, clip_cfg: dict,
                  vod_length: float) -> tuple[float, float]:
     """Force the clip to be between min_seconds and max_seconds long.
 
-    Too long: rebuild it around the peak at target_seconds, ~45% before the peak
-      (the build-up) and ~55% after (the reaction).
+    Too long: keep the start (the build-up) and shorten the end, never past the payoff's
+      reaction; up to max_seconds_setup (60 s) is allowed when the setup needs it.
     Too short: grow it, 60% of the missing time added before and 40% after.
     """
     lo, hi = clip_cfg["min_seconds"], clip_cfg["max_seconds"]
     length = end - start
     if length > hi:
-        target = clip_cfg["target_seconds"]
-        start = peak - clip_cfg["keep_before_ratio"] * target
-        end = start + target
+        # Setup beats shortness: keep the start (the build-up) and shorten the END, keeping the
+        # payoff and ~4 s of reaction. Only past max_seconds_setup does the start move.
+        # (It used to re-centre the clip on the peak, which cut the play that led to it.)
+        end = max(start + hi, min(end, peak + clip_cfg["reaction_keep"]))
+        if end - start > clip_cfg["max_seconds_setup"]:
+            start = end - clip_cfg["max_seconds_setup"]
     elif length < lo:
         missing = lo - length
         start -= 0.6 * missing
@@ -169,7 +188,7 @@ def find_candidates(raw: dict[str, np.ndarray], cfg: dict, top_n: int | None = N
     from clipper.signals import all_z_scores
 
     z = all_z_scores(raw, cfg)
-    score = combine(z, cfg)
+    score = score_signals(raw, z, cfg)
     peaks = pick_peaks(score, cfg["peaks"]["threshold"], cfg["peaks"]["min_gap_seconds"],
                        top_n or cfg["general"]["top_n"])
     candidates = []

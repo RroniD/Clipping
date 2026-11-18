@@ -43,7 +43,7 @@ def test_kick_recorder_roundtrip(tmp_path):
 
 def test_repo_config_files_load():
     cfg = load_config()                 # the real config.toml
-    assert cfg["peaks"]["threshold"] == 2.5
+    assert cfg["peaks"]["threshold"] == 2.0
     assert cfg["signals"]["floor"]["chat"] > 0
     assert isinstance(load_streamers(), dict)
 

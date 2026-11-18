@@ -3,11 +3,12 @@
 import numpy as np
 
 from clipper.config import load_config
+from helpers import spec_config
 from clipper.scoring import clamp_length, combine, pick_peaks, rough_bounds, snap_to_speech
 from clipper.signals import is_hype, robust_z, viewer_clip_signal
 from clipper.transcribe import Word, build_sentences
 
-CFG = load_config(None)
+CFG = spec_config()
 CLIP = CFG["clip"]
 
 
@@ -74,16 +75,22 @@ def test_snap_never_starts_after_peak_guard():
     assert start == 110 - CLIP["peak_guard"]
 
 
-def test_clamp_too_long_keeps_peak():
+def test_clamp_too_long_keeps_the_build_up():
+    """Shortening a long clip cuts the END (after the reaction), never the setup at the start."""
+    start, end = clamp_length(0, 100, peak=20, clip_cfg=CLIP, vod_length=1000)
+    assert start == 0 and end == CLIP["max_seconds"]
+    # Payoff late in the clip: it may run up to max_seconds_setup to keep both setup and payoff.
     start, end = clamp_length(0, 100, peak=50, clip_cfg=CLIP, vod_length=1000)
-    assert end - start == CLIP["target_seconds"]
-    assert start < 50 < end
-    assert abs((50 - start) - 0.45 * CLIP["target_seconds"]) < 0.01
+    assert start == 0 and end == 50 + CLIP["reaction_keep"]
+    # Only beyond max_seconds_setup does the start move.
+    start, end = clamp_length(0, 100, peak=70, clip_cfg=CLIP, vod_length=1000)
+    assert end == 70 + CLIP["reaction_keep"] and end - start == CLIP["max_seconds_setup"]
 
 
 def test_clamp_too_short_grows_60_40():
     start, end = clamp_length(100, 110, peak=105, clip_cfg=CLIP, vod_length=1000)
-    assert (start, end) == (97.0, 112.0)
+    missing = CLIP["min_seconds"] - 10
+    assert (start, end) == (100 - 0.6 * missing, 110 + 0.4 * missing)
 
 
 def test_clamp_stays_inside_vod():
@@ -93,7 +100,7 @@ def test_clamp_stays_inside_vod():
 
 def test_combine_bonus_when_audio_and_chat_spike_together():
     z = {"chat": np.array([0, 4, 0, 0, 0.0]), "audio": np.array([0, 4, 0, 0, 0.0])}
-    cfg = load_config(None)
+    cfg = spec_config()
     cfg["scoring"]["smooth_seconds"] = 1
     score = combine(z, cfg)
     assert score[1] == 1.0 * 4 + 0.7 * 4 + 0.5 * 4

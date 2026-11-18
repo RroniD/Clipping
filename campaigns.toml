@@ -1,0 +1,35 @@
+# Campaign profiles: what each clipping campaign requires. The editor burns in the disclosure
+# and credit and respects the length limit; the review queue lets you pick a campaign per clip,
+# shows its tags and rules, and logs where and when you posted.
+#
+# Copy the example below for every campaign you join, and fill it in FROM THE CAMPAIGN'S OWN
+# RULES PAGE (Content Rewards / Whop / the streamer's deal). Nothing here is real campaign data.
+#
+# [campaigns.<short_name>]
+# name = "Shown in the queue"
+# streamer = "streamer_login"          # optional: only offer this campaign for this streamer
+# disclosure = "#ad"                   # text burned into the first seconds (if the rules ask for one)
+# disclosure_seconds = 3
+# credit = "twitch.tv/streamer_login"  # replaces the default credit line if the rules want a handle
+# required_tags = ["#streamername"]    # shown in the queue; add them to your post caption
+# platforms = ["tiktok", "youtube", "instagram"]
+# min_seconds = 15
+# max_seconds = 60                     # the editor cuts longer clips down to this
+# banned = ["gambling", "other streamers' faces without permission"]   # reminders shown in the queue
+# rate_per_1000 = 0.0                  # what it pays, for your own tracking
+# rules_url = "https://..."            # where you read the rules
+#
+# Example (commented out on purpose: fill in a real campaign's rules, then remove the #'s):
+# [campaigns.example]
+# name = "Example campaign (replace me)"
+# streamer = "ishowspeed"
+# disclosure = ""
+# disclosure_seconds = 3
+# credit = ""
+# required_tags = []
+# platforms = ["tiktok", "youtube"]
+# min_seconds = 15
+# max_seconds = 60
+# banned = []
+# rate_per_1000 = 0.0
+# rules_url = ""

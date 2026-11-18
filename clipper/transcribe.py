@@ -49,6 +49,7 @@ class Transcriber:
         self.cfg = cfg["whisper"]
         self.model = None
         self.on_cpu = False
+        self.last_language = "en"   # language of the last transcribed window (e.g. "en", "es", "ar")
 
     def _load(self, cpu: bool) -> None:
         from faster_whisper import WhisperModel  # heavy import, only when needed
@@ -72,8 +73,11 @@ class Transcriber:
             self._load(cpu=True)
 
     def _run(self, wav: Path) -> list:
-        segments, _info = self.model.transcribe(str(wav), word_timestamps=True, vad_filter=True)
-        return list(segments)  # transcribe() is lazy; list() makes it actually run
+        segments, info = self.model.transcribe(str(wav), word_timestamps=True, vad_filter=True)
+        segments = list(segments)  # transcribe() is lazy; list() makes it actually run
+        # Whisper detects the spoken language for free; non-English clips get English captions.
+        self.last_language = getattr(info, "language", None) or "en"
+        return segments
 
     def transcribe_window(self, audio_path: Path, start: float, end: float) -> list[Word]:
         """Words spoken between start and end (VOD seconds), with VOD-based timestamps."""

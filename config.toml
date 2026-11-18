@@ -2,50 +2,94 @@
 # Anything you leave out falls back to the default in clipper/config.py.
 
 [general]
-top_n = 15                 # max number of candidates per VOD
+top_n = 15                 # how many clips to keep per VOD (after the AI judge)
+top_n_detect = 40          # how many moments the detector proposes for the judge to choose from
+explore_share = 0.15       # ~15% of kept slots go to ranks 16-30 ("explore"), so the tool can learn
+                           # whether its ranking is right (see python -m clipper.learn)
 
 [chat]
-lag_seconds = 6            # chat reacts this many seconds after the moment; we shift chat earlier
+lag_seconds = 0            # chat reacts this many seconds after the moment; we shift chat earlier
+                           # (per streamer it's measured from viewer clips when possible: out\<name>\calibration.json)
 smooth_seconds = 5         # messages are summed over a window this wide
 baseline_seconds = 300     # rolling window for the robust z-score
+per_user_cap = 2           # count at most this many messages per person per 5-s window (spammers)
 hype_ratio = 0.5           # a message is "hype" if at least this share of its words are hype words
 hype_words = ["kekw", "omegalul", "lul", "lmao", "lmfao", "pog", "pogchamp", "poggers", "pogu",
-              "w", "ww", "www", "monkas", "pepelaugh", "icant", "sadge", "holy", "wtf", "bro",
-              "💀", "😂", "🤣", "😭", "🔥"]
-hype_phrases = ["clip it", "clip that", "no way", "oh my god", "omg"]
+              "w", "ww", "www", "monkas", "monkaw", "pepelaugh", "icant", "sadge", "holy", "wtf", "bro",
+              "clueless", "aware", "d:", "kappa", "sheesh", "goated", "clutch", "nah", "bruh",
+              # GTA: what chat types when something big happens in the game
+              "wasted", "busted", "heist", "cops", "rip",
+              "💀", "😂", "🤣", "😭", "🔥", "😱", "🚔"]
+hype_phrases = ["clip it", "clip that", "no way", "oh my god", "omg", "aint no way", "ain't no way",
+                "bro what", "he got wasted", "5 stars", "five stars", "get out", "go go go", "skill issue"]
+# Chat bots post timers and links, not reactions: their messages are ignored.
+bots = ["fossabot", "nightbot", "streamelements", "streamlabs", "moobot", "wizebot", "sery_bot",
+        "soundalerts", "pokemoncommunitygame", "kofistreambot", "botrixoficial", "kickbot"]
+
+[chat.moods]
+# What KIND of reaction chat is having. The AI judge gets the mix (e.g. 70% funny, 20% confusion).
+funny = ["kekw", "omegalul", "lul", "lmao", "lmfao", "icant", "pepelaugh", "lol", "haha", "clueless",
+         "😂", "🤣", "💀", "😭"]
+hype = ["pog", "pogchamp", "poggers", "pogu", "w", "lets go", "clip it", "clip that", "goat", "goated",
+        "sheesh", "clutch", "🔥", "insane"]
+tense = ["monkas", "monkaw", "😬", "😱", "holy", "nervous", "dont", "noooo", "run", "go go go", "get out",
+         "cops", "5 stars", "five stars", "🚔"]
+confusion = ["huh", "what", "wtf", "wait what", "how", "bro what", "🤔"]
+fail = ["l", "f", "rip", "unlucky", "noob", "fail", "ratio", "wasted", "busted", "skill issue", "🤡"]
 
 [audio]
 sample_rate = 8000         # 8 kHz is plenty for loudness and keeps it fast
 baseline_seconds = 300
+music_removal = "demucs"   # "demucs" = when a clip's background music is LOUD (copyright-claim risk),
+                           # split voice from background and turn the background down. Needs the
+                           # separate .venv-demucs environment (see README). "off" = never.
+events = true              # detect laughter / screams / music in candidate moments (PANNs model)
+music_only_share = 0.7     # music in 70%+ of a clip with almost no talking -> warning (cutscene/copyright)
+music_loud_db = 6          # "loud" = background less than 6 dB quieter than the voice
+music_down_db = 15         # how much to turn loud background down
 
 [signals]
 # The robust z-score divides by the spread of the signal. When chat is dead the spread is 0,
 # so one message would look like a giant spike. The floor is the smallest spread we allow.
-floor = { chat = 3.0, unique = 2.0, hype = 1.0, audio = 2.0, viewer_clips = 0.5 }
+floor = { chat = 3.0, unique = 2.0, hype = 1.0, audio = 2.0, viewer_clips = 0.5, spam = 1.0, newcomers = 1.0, caps = 1.0 }
 viewer_clip_sigma = 8      # seconds; width of the bump each viewer clip adds
 viewer_clip_center = 0.6   # bump sits at vod_offset + this x clip duration
 
 [weights]
-chat = 1.0
-unique = 0.8
-hype = 1.2
-audio = 0.7
+chat = 0.26
+unique = 1.85
+hype = 1.96
+audio = 0.14
 viewer_clips = 1.5
+spam = 0.01                 # many different people typing the same thing at once
+newcomers = 0.0          # first-time chatters: tested on 6 Speed VODs, did not help (kept off; retest on GTA)
+caps = 0.0               # ALL-CAPS messages: tested, did not help (kept off; retest on GTA)
+# Extra signals measured on each candidate moment (re-rank the candidates, see audio_events.py):
+laugh = 1.0                # a burst of laughter around the moment
+scream = 0.8               # a real scream / yell
+facecam_reaction = 0.8     # the streamer moves a lot in the webcam box (only when a face is in it)
 
 [scoring]
-z_cap = 8                  # each z-score is clipped to [0, z_cap] so one signal can't dominate
+scorer = "learned"         # "learned" = the model trained on what viewers clipped (models\scorer.joblib,
+                           # made by python -m clipper.bench run); "hand" = the weighted formula below.
+                           # Without a saved model (or without chat) the hand formula is always used.
+learned_scale = 2          # learned score = this x (how far the model's log-odds stand above the
+                           # stream's usual level): puts it on the hand score's scale (threshold 2 = ~2.7x the odds)
+z_cap = 8                 # each z-score is clipped to [0, z_cap] so one signal can't dominate
 both_bonus = 0.5           # bonus x min(z_audio, z_chat) when both spike together
 smooth_seconds = 3
 
 [peaks]
-threshold = 2.5
+threshold = 2.0            # a bit lower than before: the AI judge filters, so we can look wider
 min_gap_seconds = 45
 
 [clip]
-min_seconds = 15
-max_seconds = 60
-target_seconds = 30
-pre_roll = 12              # start this many seconds before the peak
+min_seconds = 25
+max_seconds = 45           # normal upper length...
+max_seconds_setup = 60     # ...but a clip whose build-up needs it may run this long: setup beats shortness
+reaction_keep = 4          # when shortening, always keep this many seconds after the peak (the reaction)
+target_seconds = 35
+pre_roll = 12              # start this many seconds before the peak (more if the build-up is long)
 build_up_max = 20          # may extend back this much more while score stays high
 post_roll = 3              # extra seconds after the score falls off
 tail_max = 45              # end at most this many seconds after the peak (before post_roll)
@@ -54,6 +98,7 @@ keep_before_ratio = 0.45   # when trimming a too-long clip, keep this share befo
 snap_back_max = 8          # move start back at most this far to reach a sentence start
 snap_forward_max = 6       # move end forward at most this far to reach a sentence end
 peak_guard = 3             # the clip never starts later than peak - this
+viewer_clip_bounds = true  # when 2+ viewer clips cover a moment, start from where THEY cut it
 
 [whisper]
 model = "large-v3"
@@ -63,21 +108,155 @@ window_padding = 10        # transcribe this many seconds around each rough clip
 fallback_model = "small"   # used on CPU if the GPU setup fails
 sentence_gap = 0.8         # a pause this long (s) also ends a sentence
 
+[launch]
+# No spoilers / no pre-release footage (CLAUDE.md hard rule 2). Rockstar removes leaked or
+# pre-release footage, so any GTA 6 footage recorded before the launch gets the warning flag.
+gta6_us_launch_utc = "2026-11-19T00:00:00-05:00"
+title_patterns = ["gta ?6", "gta ?vi\\b", "grand theft auto ?(vi|6)\\b"]
+launch_mode = true         # launch weeks: spoiler_risk "low" also gets the warning flag
+# Words that suggest a story moment (in what the streamer says, or 3+ times in chat).
+story_words = ["spoiler", "spoilers", "mission passed", "mission complete", "mission failed", "cutscene",
+               "the ending", "end credits", "final mission", "plot twist", "he died", "she died"]
+
+[framecheck]
+# A cheap local look at the clip (1 frame per second) for cutscenes and loading screens.
+enabled = true
+analysis_format = "bv*[height<=360]+ba/b[height<=360]/worst"   # small download, only for looking
+letterbox_share = 0.10     # cinematic black bars: top/bottom 10% of the frame almost black...
+letterbox_luma = 20        # ...(brightness below this, 0-255)...
+letterbox_seconds = 4      # ...for at least this long
+hud_missing_ratio = 0.45   # minimap box has < 45% of its usual detail (needs hud_box per streamer)
+hud_missing_seconds = 5
+blank_std = 8              # an (almost) single-colour frame = loading/black screen...
+blank_seconds = 3          # ...for at least this long
+
+[layout]
+# Pick split / no_facecam / crop per clip (clipper/layoutcheck.py + the AI judge).
+auto = false               # false = always use the streamer's layout from streamers.toml
+                           # (off since Nov 18: Lacy's dark webcam failed the skin check -> game-only clips,
+                           # but his campaign needs him on screen. Set true again to let it decide per clip.)
+find_facecam = true        # if the measured webcam box shows no face, search the frame edges for the webcam
+face_skin = 0.30           # facecam box has a face: >= 30% skin-coloured pixels...
+box_max_motion = 15        # ...and the box is steady (webcam ~7; game scenery 27-40 in real clips)
+fullscreen_face_skin = 0.35   # no face in the box but >= 35% skin in the middle of the frame...
+fullscreen_max_motion = 20    # ...and it's steady -> fullscreen camera ("crop")
+text_detail = 25           # lots of fine detail in the box (chat text)
+
 [judge]
-# Stage 1b: the AI model rates each candidate, writes a hook/title and flags spoilers.
+# The AI model watches each candidate, picks the cut, rates it and flags spoilers.
 # Needs ANTHROPIC_API_KEY in .env. Run with --no-judge to skip it.
 enabled = true
-model = "claude-opus-5-5"     # cheaper option: "claude-haiku-5-5"
+model = "claude-haiku-5-5"    # cheap ($0.10 / $0.50 per million tokens). Smarter: "claude-opus-5-5"
 effort = "low"                # how hard the model thinks: low / medium / high
-max_candidates = 20           # only the best N candidates are judged, to keep cost down
-max_tokens = 4000
-chat_sample = 25              # how many chat messages from the clip the model sees
-fallbacks = true              # if the model declines a clip, retry on a fallback model
-warn_on = ["low", "high"]     # spoiler_risk levels that get the warning flag
+max_candidates = 40           # judge this many candidates (Haiku makes this ~1 cent per VOD)
+max_tokens = 4000             # thinking counts toward this, keep it at 4000 or more
+chat_sample = 30              # how many chat messages from the moment the model sees
+frames = 15                   # still frames per moment (about 1 every 2 s, max this many)
+frame_width = 512             # small frames are cheap and still show what happens
+window_before = 20            # the AI sees (and may start) up to 20 s before the detector's cut,
+                              # so it can find the play that led to the moment...
+window_after = 6              # ...and end up to 6 s later
+max_start_delay = 3           # the AI may start at most 3 s LATER than the detector (skip dead time,
+                              # never the setup); earlier is always allowed
+fallbacks = true              # bigger models only: retry on a fallback model if one declines
+warn_on = ["high"]            # spoiler_risk levels that get the warning flag ("low" too in launch_mode)
 cutscene_quiet_seconds = 12   # flag clips with this many seconds of no speech + quiet chat
 chat_quiet_z = 0.0            # "quiet chat" = chat z-score at or below this
 neutral_score = 5             # AI score used for clips that couldn't be judged
+hook_model = ""                  # OFF for now (cheaper: everything uses Haiku). For better hooks put back
+                                 # "claude-sonnet-5-5" (~+$0.10 per VOD / ~+$0.10 per live hour). Smarter model that rewrites hooks/titles/caption for the KEPT clips
+                              # (~$0.005 per clip). "" = off, Haiku's hooks are used.
+hook_top_n = 10               # how many kept clips get the smarter hooks (= the 10 that get edited;
+                              # measured: ~$0.007 per clip, so ~$0.07 per VOD + ~$0.04 for Haiku)
+hook_frames = 4               # frames it sees (fewer than the first judge, to keep it cheap)
+self_check = true             # the first judge looks at each FINISHED clip (~$0.0005) and fixes a wrong layout
+rank_weight = 0.3             # how much the side-by-side ranking counts vs. each clip's own score
+signal_power = 0.5            # final score = signal^0.5 x AI^2: once a moment passed the detector,
+ai_power = 2.0                # how GOOD it is matters more than how loud chat was
 
 [download]
 padding = 2                # extra seconds on both sides of each preview
 preview_format = "bv*[height<=720]+ba/b[height<=720]/b"
+
+[edit]
+# Stage 2: finished vertical 9:16 clips (python -m clipper.edit render out\<streamer>\<vod_id>)
+top_n = 10                 # how many of the best (non-warning) candidates to edit
+source_format = "bv*[height<=1080]+ba/b[height<=1080]/b"   # only the clip section is downloaded
+fps = 30
+preset = "veryfast"        # x264 speed/size trade-off
+crf = 20                   # x264 quality: lower = better and bigger (18-23 is sensible)
+facecam_share = 0.35       # "split" layout: facecam takes the top 35% of the screen
+blur_strength = 10         # "no_facecam" layout: blur of the background fill
+no_facecam_zoom = 1.3      # "no_facecam" layout: game 30% bigger, sides trimmed (1.0 = whole width, small)
+smart_crop = true          # ...and the visible part follows the action left/right instead of the centre
+smart_crop_smooth = 5      # higher = calmer camera (samples are 0.5 s apart)
+font = "Arial Black"       # any font installed on Windows, by name
+caption_size = 84
+caption_max_words = 3      # 2-4 words on screen at a time
+caption_max_chars = 16
+caption_gap = 0.6          # a pause this long (s) starts a new caption
+caption_uppercase = true
+caption_highlight = "&H00FFFF&"   # the word being spoken turns this colour (yellow; ASS colours are BGR)
+caption_lead = 0.1         # captions appear this much before the word is spoken (feels in sync)
+punch_color = "&H3C3CFF&"  # the AI's 1-2 "punch words" get this colour (red) and grow a little
+speaker_colors = false     # EXPERIMENTAL: other voices get their own caption colour. Off: in fast
+                           # gaming banter voices switch mid-sentence and it couldn't separate them
+                           # (tested on a Speed + teammates clip), and it adds ~35 s per clip.
+other_speaker_color = "&HFFFF00&"   # cyan (ASS colours are BGR)
+caption_y_no_facecam = 0.62   # caption height as a share of the screen (0 = top)
+caption_y_crop = 0.62
+hook = true                # big hook text for the first seconds (from the AI judge)
+hook_size = 64
+hook_seconds = 2.2
+hook_y = 0.17
+banner = true              # after the hook, a smaller line of context stays at the top
+banner_size = 44
+credit = true              # small "twitch.tv/<name>" line; campaigns usually require it
+credit_size = 34
+dead_air = true            # trim quiet stretches at the very start / end of a clip (nobody talks AND the game is quiet)
+dead_air_inside = false    # true = also cut quiet pauses INSIDE the clip (can cut build-up: off by default)
+dead_air_gap = 0.7         # only pauses longer than this...
+dead_air_keep = 0.15       # ...and keep this much air around the words
+dead_air_quiet_db = 4      # "quiet" = at least this many dB below the clip's typical loudness
+zoom = true                # short punch-in zoom on the peak reaction
+zoom_factor = 1.12
+zoom_seconds = 1.4
+teaser_seconds = 0         # >0: show this many seconds of the peak first, then the clip (test it!)
+loudness_lufs = -14        # what the platforms normalise to
+duck_music_db = 0          # >0 lowers volume by this many dB when nobody talks (does NOT remove music)
+# Safe zone on the 1080x1920 screen: platform buttons and captions cover the rest.
+safe_top = 288
+safe_bottom = 1248
+safe_left = 120
+safe_right = 888
+cover = true               # save cover.jpg (the peak frame) next to each finished clip
+
+[queue]
+# Stage 3: review queue (python -m clipper.queue_app), open it on your phone on the same Wi-Fi
+host = "0.0.0.0"           # 0.0.0.0 = reachable from other devices on your Wi-Fi; "127.0.0.1" = this laptop only
+port = 8000
+trim_step = 2              # seconds per tap on the trim buttons
+min_seconds = 5            # trimming can't make a clip shorter / longer than this
+max_seconds = 90
+submit_minutes = 30        # after approving, post + submit to the campaign within this time
+
+[live]
+# Stage 4: live mode (python -m clipper.live)
+poll_seconds = 60          # how often to ask Twitch/Kick who is live
+check_seconds = 5          # how often to re-score the latest minutes
+clip_poll_seconds = 30     # how often to ask Twitch for viewer clips made during the stream
+window_seconds = 900       # score the last 15 minutes (the z-score needs a few minutes of "normal")
+warmup_seconds = 240       # after joining a stream, wait this long before trusting any peak
+edge_seconds = 60          # ignore peaks this close to the window's oldest edge
+confirm_seconds = 30       # a peak counts only after its reaction has played out (30-60 s)
+max_peaks_per_check = 10
+buffer_minutes = 6         # keep this many minutes of recorded stream on disk
+min_free_gb = 5            # pause recording if the disk has less free space than this
+segment_seconds = 6        # the recording is saved in pieces this long (shorter = cut sooner)
+buffer_format = "best[height<=1080]/best"
+x264_threads = 6           # CPU threads for rendering clips (fewer = smoother game/stream alongside)
+x264_preset = "superfast"  # faster than "veryfast", slightly bigger files; live clips reach you sooner
+whisper_model = ""         # e.g. "small" to use less GPU while gaming; "" = same as [whisper]
+min_quality = 4.0          # AI quality below this (1-10): saved for learning, but not edited into a clip
+                           # (was 4.5: on Lacy's GTA marathon only 1 in 5 moments passed; you filter in the queue)
+music_removal = false      # music removal takes ~40-70 s per clip on this laptop: off live, to stay fast

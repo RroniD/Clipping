@@ -1,9 +1,9 @@
 # AutoClipper
 
 Finds the most clip-worthy moments in Twitch and Kick VODs. The full plan is in [CLAUDE.md](CLAUDE.md).
-**Built so far: Stage 1 (the detector) and Stage 1b (the AI judge).** It turns a VOD URL into
+**Built so far: Stage 1 (the detector), Stage 1b (the AI judge), Stage 2 (the editor), Stage 3 (the review queue) and Stage 4 (live mode).** It turns a VOD URL into
 `candidates.json` plus short horizontal preview clips, each rated by an AI model with a hook, a title
-and a spoiler check. It doesn't edit, post or upload anything.
+and a spoiler check, and then into finished vertical 9:16 clips with captions. You approve or reject them on your phone. It doesn't post or upload anything.
 
 ## How it works (Stage 1)
 
@@ -99,3 +99,159 @@ and checks that all three are found within ±3 s.
 
 Run it on 2–3 real GTA 6 VODs and watch the top 15 previews of each. Pass = at least ~8 genuinely good moments
 per VOD, and none start or end mid-sentence.
+
+## Stage 2: finished vertical clips
+
+```powershell
+# 1. Once per streamer: save a frame and measure where the facecam and gameplay are
+python -m clipper.edit frame out\ishowspeed\2928036561 --at 21m41s
+#    -> out\...\layout\frame_grid.png   (the frame with a pixel grid: read the boxes off it)
+#    -> out\...\layout\preview_9x16.png (how the vertical clip will look with the current boxes)
+
+# 2. Make the finished clips (the best 10 that have no warning)
+python -m clipper.edit render out\ishowspeed\2928036561
+#    --only 1,3,7  just those ranks   --include-warnings  also flagged clips (check them first!)
+#    --layout crop / no_facecam  for clips from another scene (e.g. fullscreen camera or fullscreen game)
+```
+
+Layout boxes go in `streamers.toml`, in pixels of the saved 1920x1080 frame, as `[x, y, width, height]`
+from the top-left corner:
+
+```toml
+[streamers.ishowspeed]
+platform = "twitch"
+layout = "split"                 # "split" = facecam top 35%, gameplay below
+frame = [1920, 1080]             # size of the frame the boxes were measured on
+facecam = [0, 398, 457, 256]
+gameplay = [460, 110, 760, 880]
+```
+
+Other layouts: `layout = "no_facecam"` (gameplay in the middle with a blurred copy filling the rest) and
+`layout = "crop"` (one box fills the whole screen; good for IRL / Just Chatting). After changing boxes, run
+`frame` again and look at `preview_9x16.png`. Streamers often switch scenes (gameplay + facecam, fullscreen camera,
+fullscreen game), so check each finished clip and re-render the odd ones, e.g.
+`python -m clipper.edit render out\ishowspeed\2928036561 --only 5 --layout crop`.
+
+What `render` does per clip:
+1. Downloads **only that section** of the VOD at up to 1080p (`out\...\sources\`).
+2. Builds the 9:16 picture with one ffmpeg `filter_complex`, 1080x1920, 30 fps, H.264 (`veryfast`, CRF 20), AAC.
+3. Captions: Whisper word timings (saved by `run.py`; re-transcribed for older runs), 2-4 words at a time,
+   bold with an outline, on the line between facecam and gameplay. Hook text (from the AI judge) in a box for
+   the first ~2 s. A small `twitch.tv/<name>` credit bottom-left. Nothing goes in the bottom 20% or at the
+   right edge, where TikTok/Shorts/Reels put their buttons. The `.ass` subtitle files are in `final\work\`.
+4. Audio: loudness normalised to -14 LUFS (two passes: measure, then one exact gain change). `duck_music_db` in `config.toml` (off by default) lowers the volume
+   when nobody is talking. Stream audio is one mixed track, so this **only makes music quieter between
+   sentences; it doesn't remove it and doesn't make a clip safe from copyright claims.**
+
+Clips flagged with a warning (possible spoiler/cutscene) are skipped unless you pass `--include-warnings`.
+Finished clips land in `out\<streamer>\<vod_id>\final\`. All the numbers (font, sizes, positions, quality) are
+in the `[edit]` section of `config.toml`.
+
+## Stage 3: review queue (approve clips from your phone)
+
+```powershell
+python -m clipper.queue_app
+```
+
+It imports every finished clip in `out\<streamer>\<vod_id>\final\` into a database (`out\queue.db`) and prints two
+addresses: one for the laptop and one for your phone, e.g. `http://192.168.1.23:8000`. Open that on your phone
+while it's on the **same Wi-Fi** and the laptop is awake. Stop the queue with Ctrl+C.
+
+On the page, each clip has:
+- the video, the AI's reason and the transcript, and a ⚠ box with the reasons if it's a possible spoiler/cutscene
+- **Title** (saved when you tap outside the box; it's used for posting later) and **Hook** (the text on screen for the first 2 s)
+- **Trim**: Start −2 s / +2 s and End −2 s / +2 s, and a **Layout** switch (facecam + gameplay / blurred
+  background / full-screen crop). Then press **Re-render**. It takes up to a minute and the new video appears by itself.
+- **Approve** / **Reject** / **Back to pending**. Approve only marks the clip approved; **nothing is posted anywhere**.
+  Approving a ⚠ clip asks you to confirm that you watched it fully.
+
+Re-importing (restarting the queue after rendering more clips) only adds new clips; your decisions and edits stay.
+
+**If the phone can't connect:**
+1. When Windows shows a firewall pop-up for Python, allow it on **Private networks**.
+2. Your home Wi-Fi must be set to **Private**: Windows Settings > Network & internet > Wi-Fi > (your network) >
+   Network profile type > Private. Only do this on a network you trust (your home), not school or café Wi-Fi.
+3. Phone and laptop must be on the same Wi-Fi (not the phone on mobile data).
+
+**Security:** there's no password in this stage. Anyone on the same Wi-Fi who knows the address can open the page
+and approve or reject clips (still nothing gets posted). Only run it on your home Wi-Fi. To use it away from home later,
+install Tailscale on the laptop and the phone and open `http://<laptop's Tailscale address>:8000`.
+Settings (port, trim step, min/max length) are in the `[queue]` section of `config.toml`.
+
+## Stage 4: live mode
+
+```powershell
+python -m clipper.live                 # watch every streamer in streamers.toml
+python -m clipper.live --only name1    # just one
+python -m clipper.queue_app            # in a second PowerShell window: the review queue
+```
+
+Leave it running. Every minute it asks Twitch (and Kick) which allow-listed streamers are live. For each live one it:
+1. records chat (Twitch: anonymous read-only IRC, no login needed; Kick: the same recorder as `clipper.kick_chat`)
+2. records the stream into 10-second pieces in `out\<streamer>\live_<start time>\buffer\` and deletes pieces older than
+   6 minutes, so it uses a few hundred MB of disk (but ~3 GB of download per hour at 1080p)
+3. every 5 s scores the last 15 minutes with the same signals as Stage 1
+4. once a moment's reaction has played out (45 s), cuts it from the recording, transcribes it, snaps it to sentences, asks the
+   AI judge (if `ANTHROPIC_API_KEY` is set), edits it (Stage 2) and adds it to the review queue as **pending**.
+   The terminal prints `clip ready in the review queue: ...` with how long after the moment it was ready (usually 1-3 min).
+
+Nothing is posted. Clips with a warning arrive marked ⚠. It only ever watches streamers in `streamers.toml`.
+Chat and loudness are saved as they arrive (`chat.jsonl`, `audio_db.npy`; `chat.json` on stop), so a crash loses nothing and
+`run.py <VOD url> --chat out\<streamer>\live_...\chat.json` can reuse the chat later. Restarting during the same stream
+continues in the same folder and doesn't clip the same moments again. Ctrl+C stops recording and finishes the clips that
+are being made (Ctrl+C again to quit right away). If Python is closed or crashes, Windows stops the recorder too.
+
+Good to know:
+- Twitch shows ads to viewers without Turbo; if the streamer runs an ad break, the recording has the ad for those minutes.
+  Moments almost never happen then, but look at each clip in the queue anyway.
+- Live layout: clips use the streamer's layout from `streamers.toml`; fix scene changes in the queue with the Layout switch.
+- Laptop load: recording is just copying data (almost no CPU). Making a clip uses the GPU (Whisper) and 4 CPU threads (x264)
+  for ~30 s, one clip at a time. If you game on the same laptop, set `whisper_model = "small"` in `[live]` of `config.toml`.
+- Test on any channel without saving anything: `python -m clipper.live --test-channel <name>` prints the moments it would clip
+  and saves no clips (hard rule 3). Delete `out\_live_test` afterwards.
+- Twitch's "create clip" API isn't used: it needs a Twitch login (OAuth with `clips:edit`) and we already have the moment
+  in our own recording.
+
+## Clip quality upgrades (how it picks and edits clips that go viral)
+
+What short-form platforms reward (research, Nov 2026): people decide in the first 1-3 s whether to swipe, and
+reach depends on how much of the clip gets watched. So the tool now:
+
+**Finds more, keeps the best.** The detector proposes ~40 moments per VOD (`general.top_n_detect`), the AI judge
+looks at all of them and 15 are kept (`general.top_n`). Two of those 15 slots are "explore" picks from ranks 16-30,
+so `python -m clipper.learn` can tell whether the ranking is actually right.
+
+**Cleaner chat signals.** Bots (Fossabot, Nightbot...), `!commands` and sub/raid notices are ignored; one person can
+count at most 2 messages per 5 s (some chatters send 500 per stream); a new `spam` signal catches waves of different
+people typing the same thing. Chat lag is measured per streamer from viewer clips (`out\<streamer>\calibration.json`)
+instead of assuming 6 s. When 2+ viewers clipped a moment, their median cut is the starting point.
+
+**An AI judge that watches.** For each moment the judge (default `claude-haiku-5-5`, about a cent per VOD) gets 15
+still frames, the transcript with timestamps, chat with timestamps and its mood mix (funny / hype / tense / confusion /
+fail), and the titles viewers gave their own clips. It returns: the exact cut (start on the action, end right after the
+payoff, on sentence edges), scores for "makes sense to a stranger", hook, payoff and visual payoff, the facecam
+reaction, whether it's a cutscene or a menu, a hook, a **context line**, a story-style title and hashtags. Then it ranks
+all moments of the stream against each other. Final score = signal^0.5 x AI^2 (the AI's opinion counts more than how
+loud chat was; set `signal_power`/`ai_power` to 1 for the original signal x AI).
+
+**No spoilers, stricter.** Warning flag (never posted without you checking) when: GTA 6 footage was recorded before the
+launch (`[launch]`), the frames show cinematic black bars, a loading/black screen or a hidden minimap (set `hud_box` per
+streamer to enable that one), the AI says cutscene or rates spoiler risk low/high (launch mode), or the AI refuses to
+rate a clip.
+
+**Editing that keeps people watching.** Captions highlight the word being spoken (yellow) and appear 0.1 s early;
+the hook shows for 2 s, then the context line stays as a banner (this added context is what makes a clip count as
+original on YouTube/Instagram); pauses where nobody talks AND the game is quiet are cut; a short punch-in zoom lands on
+the peak reaction; all text stays in the safe zone (x 120-888, y 288-1248 on 1080x1920; check with
+`python -m clipper.edit render <folder> --safe-overlay`); a `cover.jpg` (the peak frame) is saved next to each clip.
+Optional: `teaser_seconds` (show the peak first), `audio.music_removal = "demucs"` (needs `pip install demucs`, a ~2.5 GB
+PyTorch download; off by default and not installed).
+
+**Campaigns.** Put each campaign's rules in `campaigns.toml` (an example is inside, commented out). In the review queue
+pick a campaign per clip: the clip is re-rendered with its disclosure, credit and length limit, the queue shows its
+required tags and banned things, a 30-minute "post + submit" countdown starts when you approve, and you log each post
+link. One post link can belong to one campaign only.
+
+**Learning.** Every approve / reject / trim / edit is logged with the signals and AI ratings at that moment.
+`python -m clipper.learn` prints how your decisions line up with them and suggests new `[weights]`; it never changes
+`config.toml` itself.
