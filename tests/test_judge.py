@@ -310,7 +310,10 @@ def test_polish_pass_rewrites_hooks_and_only_tightens_spoilers():
     d["kept"] = True
     from clipper.judge import polish_kept
     frames = [(t, b"\xff\xd8x") for t in (5, 10, 15, 20, 25, 30)]
-    assert polish_kept([d], {id(d): ([], frames)}, CFG, "speed", judge, log=lambda *_: None) == 1
+    off = {**CFG, "judge": {**CFG["judge"], "hook_model": ""}}           # the cheap setting: no second pass
+    assert polish_kept([d], {id(d): ([], frames)}, off, "speed", judge, log=lambda *_: None) == 0
+    on = {**CFG, "judge": {**CFG["judge"], "hook_model": "claude-sonnet-5-5"}}
+    assert polish_kept([d], {id(d): ([], frames)}, on, "speed", judge, log=lambda *_: None) == 1
     call = client.calls[1]
     assert call["model"] == "claude-sonnet-5-5" and call["fallbacks"] == "default"
     assert call["output_config"]["effort"] == "low" and "temperature" not in call

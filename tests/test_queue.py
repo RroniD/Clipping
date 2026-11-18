@@ -67,7 +67,7 @@ def test_warned_clip_needs_confirmation(client):
     r = client.post(f"/api/clips/{warned['id']}/status", json={"status": "approved", "confirm_warning": True})
     assert r.status_code == 200 and r.get_json()["status"] == "approved"
     counts = client.get("/api/clips").get_json()["counts"]
-    assert counts == {"pending": 1, "approved": 1, "rejected": 0}
+    assert counts == {"pending": 1, "approved": 1, "posted": 0, "rejected": 0, "removed": 0}
 
 
 def test_reject_and_back_to_pending(client):
@@ -165,9 +165,80 @@ def test_post_links_one_post_one_campaign(client):
     client.post(f"/api/clips/{b}/status", json={"status": "approved", "confirm_warning": True})
     r = client.post(f"/api/clips/{a}/posts", json={"url": url, "platform": "tiktok"})
     assert r.status_code == 200 and r.get_json()["posts"][0]["url"] == url
-    assert r.get_json()["submit_deadline"] > 0                     # countdown from approval
+    assert r.get_json()["posted_at"] > 0 and r.get_json()["submit_deadline"] is None   # logging = posted
+    assert client.get("/api/clips?status=approved").get_json()["clips"][0]["submit_deadline"] > 0
     assert client.post(f"/api/clips/{b}/posts", json={"url": url}).status_code == 409   # same post twice
     assert client.post(f"/api/clips/{a}/posts", json={"url": "not a link"}).status_code == 400
+
+
+def ids(client, tab):
+    return [c["id"] for c in client.get(f"/api/clips?status={tab}").get_json()["clips"]]
+
+
+def test_mark_posted_moves_clip_to_posted_tab_and_undo(client):
+    a, b = ids(client, "pending")
+    assert client.post(f"/api/clips/{a}/posted", json={"posted": True}).status_code == 409   # approve first
+    client.post(f"/api/clips/{a}/status", json={"status": "approved"})
+    r = client.post(f"/api/clips/{a}/posted", json={"posted": True}).get_json()
+    assert r["posted_at"] and r["status"] == "approved"
+    assert ids(client, "posted") == [a] and ids(client, "approved") == []
+    client.post(f"/api/clips/{a}/posted", json={"posted": False})
+    assert ids(client, "posted") == [] and ids(client, "approved") == [a]
+
+
+def test_remove_hides_counts_as_rejected_and_restores(tmp_path):
+    out_root = tmp_path / "out"
+    make_vod(out_root)
+    app = queue_app.create_app(db_path=tmp_path / "q.db", out_root=out_root, cfg=load_config(), start_worker=False)
+    client = app.test_client()
+    a, b = ids(client, "pending")
+    client.post(f"/api/clips/{a}/remove", json={"removed": True})
+    assert ids(client, "pending") == [b] and ids(client, "removed") == [a] and ids(client, "rejected") == []
+    db = queue_app.connect(tmp_path / "q.db")
+    actions = [r["action"] for r in db.execute("SELECT action FROM events WHERE clip_id=? ORDER BY id", (a,))]
+    assert actions == ["rejected", "removed"]                       # the learning log sees a rejection
+    assert (out_root / db.execute("SELECT video FROM clips WHERE id=?", (a,)).fetchone()["video"]).exists()
+    client.post(f"/api/clips/{a}/remove", json={"removed": False})
+    assert sorted(ids(client, "pending")) == sorted([a, b]) and ids(client, "removed") == []
+
+
+def test_remove_all_rejected_and_empty_removed(tmp_path):
+    out_root = tmp_path / "out"
+    make_vod(out_root)
+    app = queue_app.create_app(db_path=tmp_path / "q.db", out_root=out_root, cfg=load_config(), start_worker=False)
+    client = app.test_client()
+    a, b = ids(client, "pending")
+    client.post(f"/api/clips/{a}/status", json={"status": "rejected"})
+    assert client.post("/api/clips/remove_rejected", json={}).get_json()["removed"] == 1
+    assert ids(client, "removed") == [a] and ids(client, "pending") == [b]
+    # Fresh removals keep their files; only ones removed 7+ days ago are emptied.
+    assert client.post("/api/clips/empty_removed", json={}).get_json()["deleted"] == 0
+    db = queue_app.connect(tmp_path / "q.db")
+    db.execute("UPDATE clips SET removed_at=? WHERE id=?", (time.time() - 8 * 86400, a))
+    db.commit()
+    video = out_root / db.execute("SELECT video FROM clips WHERE id=?", (a,)).fetchone()["video"]
+    assert client.post("/api/clips/empty_removed", json={}).get_json()["deleted"] == 1
+    assert not video.exists() and ids(client, "removed") == [a]     # the row (and decision) stays
+
+
+def test_existing_post_links_count_as_posted_once(tmp_path):
+    out_root = tmp_path / "out"
+    make_vod(out_root)
+    db = queue_app.connect(tmp_path / "q.db")
+    queue_app.import_clips(db, out_root)
+    db.execute("PRAGMA user_version = 0")
+    db.execute("UPDATE clips SET status='approved', posted_at=NULL WHERE rank=1")
+    cid = db.execute("SELECT id FROM clips WHERE rank=1").fetchone()["id"]
+    db.execute("INSERT INTO posts (clip_id, url, posted_at) VALUES (?, 'https://x.com/1', 123.0)", (cid,))
+    db.commit()
+    db.close()
+    db = queue_app.connect(tmp_path / "q.db")
+    assert db.execute("SELECT posted_at FROM clips WHERE id=?", (cid,)).fetchone()["posted_at"] == 123.0
+    db.execute("UPDATE clips SET posted_at=NULL WHERE id=?", (cid,))       # "Undo"
+    db.commit()
+    db.close()
+    db = queue_app.connect(tmp_path / "q.db")
+    assert db.execute("SELECT posted_at FROM clips WHERE id=?", (cid,)).fetchone()["posted_at"] is None
 
 
 def test_render_checks_campaign_names(tmp_path, monkeypatch):

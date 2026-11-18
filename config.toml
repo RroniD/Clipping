@@ -163,7 +163,8 @@ warn_on = ["high"]            # spoiler_risk levels that get the warning flag ("
 cutscene_quiet_seconds = 12   # flag clips with this many seconds of no speech + quiet chat
 chat_quiet_z = 0.0            # "quiet chat" = chat z-score at or below this
 neutral_score = 5             # AI score used for clips that couldn't be judged
-hook_model = "claude-sonnet-5-5"  # smarter model that rewrites hooks/titles/caption for the KEPT clips
+hook_model = ""                  # OFF for now (cheaper: everything uses Haiku). For better hooks put back
+                                 # "claude-sonnet-5-5" (~+$0.10 per VOD / ~+$0.10 per live hour). Smarter model that rewrites hooks/titles/caption for the KEPT clips
                               # (~$0.005 per clip). "" = off, Haiku's hooks are used.
 hook_top_n = 10               # how many kept clips get the smarter hooks (= the 10 that get edited;
                               # measured: ~$0.007 per clip, so ~$0.07 per VOD + ~$0.04 for Haiku)

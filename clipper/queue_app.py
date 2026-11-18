@@ -41,6 +41,19 @@ from clipper.config import PROJECT_ROOT, load_campaigns, load_config
 
 OUT_ROOT = PROJECT_ROOT / "out"
 STATUSES = ("pending", "approved", "rejected")
+# The page's tabs. "posted" and "removed" are not statuses: a posted clip stays "approved" and a
+# removed clip keeps its approve/reject decision (so the learning log is unchanged); they only
+# decide WHERE the clip is shown.
+TABS = ("pending", "approved", "posted", "rejected", "removed")
+TAB_WHERE = {
+    "pending": "status='pending' AND removed_at IS NULL AND posted_at IS NULL",
+    "approved": "status='approved' AND removed_at IS NULL AND posted_at IS NULL",
+    "posted": "posted_at IS NOT NULL AND removed_at IS NULL",
+    "rejected": "status='rejected' AND removed_at IS NULL AND posted_at IS NULL",
+    "removed": "removed_at IS NOT NULL",
+}
+TAB_ORDER = {"posted": "posted_at DESC", "removed": "removed_at DESC"}
+EMPTY_REMOVED_DAYS = 7
 LAYOUTS = ("split", "no_facecam", "crop")
 
 SCHEMA = """
@@ -107,6 +120,9 @@ EXTRA_COLUMNS = {
     "breakdown_json": "TEXT NOT NULL DEFAULT '{}'",
     "layout_reason": "TEXT NOT NULL DEFAULT ''",
     "notes": "TEXT NOT NULL DEFAULT ''",
+    "posted_at": "REAL",                         # when you marked it posted (NULL = not posted)
+    "removed_at": "REAL",                        # when you removed it from the queue (NULL = shown)
+    "removed_status": "TEXT NOT NULL DEFAULT ''",   # its status before removal (for Restore)
 }
 
 
@@ -146,8 +162,54 @@ def connect(db_path: Path) -> sqlite3.Connection:
                   AND id NOT IN (SELECT clip_id FROM posts)""")
     if not db.execute("SELECT 1 FROM clips GROUP BY video HAVING COUNT(*) > 1").fetchone():
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS clips_one_per_video ON clips (video)")
+    if db.execute("PRAGMA user_version").fetchone()[0] < 1:
+        # Once, when the Posted tab arrived: clips you already logged a post link for are posted.
+        # (Only once, so "Undo" on the Posted tab isn't overruled at the next start.)
+        db.execute("""UPDATE clips SET posted_at=(SELECT MIN(posted_at) FROM posts WHERE clip_id=clips.id)
+                      WHERE posted_at IS NULL AND id IN (SELECT clip_id FROM posts)""")
+        db.execute("PRAGMA user_version = 1")
     db.commit()
     return db
+
+
+def set_removed(db: sqlite3.Connection, clip_id: int, removed: bool) -> None:
+    """Soft delete: hide a clip from the queue (files are kept), or restore it.
+
+    Removing a clip you hadn't decided on yet counts as rejecting it, so the learning log
+    (python -m clipper.learn) still sees "you didn't want this one". Restore puts it back
+    where it was. Call inside `with db:`."""
+    row = db.execute("SELECT status, removed_at, removed_status FROM clips WHERE id=?", (clip_id,)).fetchone()
+    now = time.time()
+    if removed and row["removed_at"] is None:
+        if row["status"] == "pending":
+            db.execute("UPDATE clips SET status='rejected', decided_at=? WHERE id=?", (now, clip_id))
+            log_event(db, clip_id, "rejected", {"via": "remove"})
+        db.execute("UPDATE clips SET removed_at=?, removed_status=?, updated_at=? WHERE id=?",
+                   (now, row["status"], now, clip_id))
+        log_event(db, clip_id, "removed")
+    elif not removed and row["removed_at"] is not None:
+        if row["removed_status"] == "pending" and row["status"] == "rejected":
+            db.execute("UPDATE clips SET status='pending', decided_at=NULL WHERE id=?", (clip_id,))
+            log_event(db, clip_id, "pending", {"via": "restore"})
+        db.execute("UPDATE clips SET removed_at=NULL, removed_status='', updated_at=? WHERE id=?", (now, clip_id))
+        log_event(db, clip_id, "restored")
+
+
+def empty_removed(db: sqlite3.Connection, out_root: Path, days: float = EMPTY_REMOVED_DAYS) -> int:
+    """Delete the video + cover files of clips removed more than `days` ago (rows and decisions
+    stay in the database). Returns how many videos were deleted."""
+    cutoff = time.time() - days * 86400
+    deleted = 0
+    root = out_root.resolve()
+    for r in db.execute("SELECT id, video FROM clips WHERE removed_at IS NOT NULL AND removed_at < ?", (cutoff,)):
+        video = (out_root / r["video"]).resolve()
+        if not video.is_relative_to(root):
+            continue
+        for f in (video, video.with_suffix(".jpg")):
+            if f.exists():
+                f.unlink()
+                deleted += f.suffix == ".mp4"
+    return deleted
 
 
 def log_event(db: sqlite3.Connection, clip_id: int, action: str, extra: dict | None = None) -> None:
@@ -257,7 +319,9 @@ def clip_dict(row: sqlite3.Row, posts: list | None = None, submit_minutes: float
     d.pop("breakdown_json", None)
     # Campaigns usually reward clips posted fast; the page counts down from approval.
     d["submit_deadline"] = (d["decided_at"] + 60 * submit_minutes
-                            if d["status"] == "approved" and d["decided_at"] else None)
+                            if d["status"] == "approved" and d["decided_at"] and not d.get("posted_at")
+                            and not d.get("removed_at") else None)
+    d["submit_minutes"] = submit_minutes
     d["posts"] = [dict(p) for p in posts or []]
     return d
 
@@ -417,19 +481,21 @@ def create_app(db_path: Path | None = None, out_root: Path = OUT_ROOT, cfg: dict
 
     @app.get("/api/clips")
     def list_clips():
-        status = request.args.get("status", "pending")
+        tab = request.args.get("status", "pending")
+        if tab not in TABS:
+            abort(400, "unknown tab")
         with lock:
             # Re-import every call: live mode and `clipper.edit render` add clips while the queue runs.
             import_clips(db, out_root)
-            rows = db.execute("SELECT * FROM clips WHERE status=? ORDER BY final_score DESC, rank",
-                              (status,)).fetchall()
-            counts = dict(db.execute("SELECT status, COUNT(*) FROM clips GROUP BY status").fetchall())
+            order = TAB_ORDER.get(tab, "final_score DESC, rank")
+            rows = db.execute(f"SELECT * FROM clips WHERE {TAB_WHERE[tab]} ORDER BY {order}").fetchall()
+            counts = {t: db.execute(f"SELECT COUNT(*) FROM clips WHERE {TAB_WHERE[t]}").fetchone()[0] for t in TABS}
             posts = db.execute("SELECT * FROM posts").fetchall()
         by_clip: dict[int, list] = {}
         for p in posts:
             by_clip.setdefault(p["clip_id"], []).append(p)
         return jsonify({"clips": [clip_dict(r, by_clip.get(r["id"]), q["submit_minutes"]) for r in rows],
-                        "counts": {s: counts.get(s, 0) for s in STATUSES}})
+                        "counts": counts})
 
     @app.get("/api/info")
     def info():
@@ -525,11 +591,50 @@ def create_app(db_path: Path | None = None, out_root: Path = OUT_ROOT, cfg: dict
                 return jsonify({"error": f"This post is already logged (clip {taken['clip_id']}, "
                                          f"campaign '{taken['campaign'] or 'none'}'). One post = one campaign."}), 409
             with db:
+                posted_at = float(body.get("posted_at") or time.time())
                 db.execute("INSERT INTO posts (clip_id, campaign, platform, url, posted_at) VALUES (?,?,?,?,?)",
-                           (clip_id, row["campaign"], str(body.get("platform", ""))[:20], url,
-                            float(body.get("posted_at") or time.time())))
+                           (clip_id, row["campaign"], str(body.get("platform", ""))[:20], url, posted_at))
+                # Logging a post link also moves the clip to the Posted tab.
+                db.execute("UPDATE clips SET posted_at=COALESCE(posted_at, ?), updated_at=? WHERE id=?",
+                           (posted_at, time.time(), clip_id))
                 log_event(db, clip_id, "post", {"platform": body.get("platform", ""), "campaign": row["campaign"]})
         return jsonify(full(clip_id))
+
+    @app.post("/api/clips/<int:clip_id>/posted")
+    def mark_posted(clip_id: int):
+        """'Mark as posted' (moves the clip to the Posted tab) or 'Undo' (back to Approved)."""
+        row = get_clip(clip_id)
+        posted = bool((request.json or {}).get("posted", True))
+        if posted and row["status"] != "approved":
+            return jsonify({"error": "Approve the clip before marking it posted."}), 409
+        with lock, db:
+            db.execute("UPDATE clips SET posted_at=?, updated_at=? WHERE id=?",
+                       (time.time() if posted else None, time.time(), clip_id))
+            log_event(db, clip_id, "posted" if posted else "unposted")
+        return jsonify(full(clip_id))
+
+    @app.post("/api/clips/<int:clip_id>/remove")
+    def remove_clip(clip_id: int):
+        """Hide a clip from the queue (files kept; restorable from the Removed tab), or restore it."""
+        get_clip(clip_id)
+        removed = bool((request.json or {}).get("removed", True))
+        with lock, db:
+            set_removed(db, clip_id, removed)
+        return jsonify(full(clip_id))
+
+    @app.post("/api/clips/remove_rejected")
+    def remove_rejected():
+        with lock, db:
+            ids = [r["id"] for r in db.execute(f"SELECT id FROM clips WHERE {TAB_WHERE['rejected']}")]
+            for i in ids:
+                set_removed(db, i, True)
+        return jsonify({"removed": len(ids)})
+
+    @app.post("/api/clips/empty_removed")
+    def empty_removed_files():
+        with lock:
+            n = empty_removed(db, out_root)
+        return jsonify({"deleted": n, "days": EMPTY_REMOVED_DAYS})
 
     @app.post("/api/clips/<int:clip_id>/status")
     def set_status(clip_id: int):
@@ -632,8 +737,11 @@ PAGE = r"""<!doctype html>
           --warn:#e6a700; --btn:#333; }
   * { box-sizing:border-box; }
   body { margin:0; font:16px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--text); }
-  header { position:sticky; top:0; z-index:2; background:#000; display:flex; gap:6px; padding:10px; }
-  header button { flex:1; }
+  header { position:sticky; top:0; z-index:2; background:#000; display:flex; flex-wrap:wrap; gap:6px; padding:8px; }
+  header button { flex:1 1 30%; padding:10px 4px; font-size:14px; }
+  .posted { background:#1f4d2e; border-radius:8px; padding:8px; margin:8px 0; }
+  .small { padding:8px; font-size:14px; }
+  .remove { background:#4a2323; }
   main { max-width:560px; margin:0 auto; padding:10px; }
   .card { background:var(--card); border-radius:12px; padding:12px; margin-bottom:18px; }
   .card.warn { border:3px solid var(--warn); }
@@ -660,9 +768,11 @@ PAGE = r"""<!doctype html>
 </style></head>
 <body>
 <header>
-  <button data-tab="pending">Pending</button>
+  <button data-tab="pending">To review</button>
   <button data-tab="approved">Approved</button>
+  <button data-tab="posted">Posted</button>
   <button data-tab="rejected">Rejected</button>
+  <button data-tab="removed">Removed</button>
 </header>
 <main>
   <details class="tools" id="tools">
@@ -697,6 +807,7 @@ PAGE = r"""<!doctype html>
     <div class="meta" id="campaigns"></div>
   </details>
 </main>
+<main id="bar" style="padding-bottom:0"></main>
 <main id="list"></main>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
@@ -723,9 +834,44 @@ async function load() {
   clips = data.clips;
   document.querySelectorAll("header button").forEach(b => {
     b.classList.toggle("on", b.dataset.tab === tab);
-    b.textContent = b.dataset.tab[0].toUpperCase() + b.dataset.tab.slice(1) + " (" + data.counts[b.dataset.tab] + ")";
+    b.textContent = TAB_NAMES[b.dataset.tab] + " (" + data.counts[b.dataset.tab] + ")";
   });
+  // Bulk buttons for the Rejected and Removed tabs.
+  document.getElementById("bar").innerHTML =
+    tab === "rejected" && clips.length ? `<div class="row"><button class="remove" onclick="removeRejected()">🗑 Remove all rejected</button></div>` :
+    tab === "removed" ? `<div class="meta">Removed clips are hidden but their files are kept, so you can Restore them.</div>
+      <div class="row"><button class="remove" onclick="emptyRemoved()">Delete files of clips removed 7+ days ago</button></div>` :
+    tab === "posted" ? `<div class="meta">Clips you posted, newest first. "Undo" moves one back to Approved.</div>` : "";
   render();
+}
+const TAB_NAMES = {pending: "To review", approved: "Approved", posted: "Posted", rejected: "Rejected", removed: "Removed"};
+async function markPosted(id, posted) {
+  try { await api(`/api/clips/${id}/posted`, {posted}); await load(); }
+  catch (e) { say(id, e.message); }
+}
+async function removeClip(id, removed) {
+  if (removed && !confirm("Remove this clip from the queue?\n\nIt's hidden, not deleted: you can restore it from the Removed tab.")) return;
+  try { await api(`/api/clips/${id}/remove`, {removed}); await load(); }
+  catch (e) { say(id, e.message); }
+}
+async function removeRejected() {
+  if (!confirm("Remove ALL rejected clips from the queue?\n\nThey move to the Removed tab (files kept).")) return;
+  const r = await api("/api/clips/remove_rejected", {}); await load(); alert(r.removed + " clip(s) removed");
+}
+async function emptyRemoved() {
+  if (!confirm("Delete the video files of clips you removed more than 7 days ago?\n\nThis can't be undone.")) return;
+  const r = await api("/api/clips/empty_removed", {}); await load(); alert(r.deleted + " video file(s) deleted");
+}
+function postedInfo(c) {
+  // When it was posted, where, for which campaign, and whether that was inside the submit window.
+  const mins = c.decided_at ? Math.round((c.posted_at - c.decided_at) / 60) : null;
+  const inTime = mins === null ? "" : mins <= c.submit_minutes ? ` · posted ${mins} min after approval ✅`
+    : ` · posted ${mins} min after approval (window was ${c.submit_minutes} min)`;
+  return `<div class="posted">✅ Posted ${new Date(c.posted_at * 1000).toLocaleString()}${inTime}
+    ${c.campaign ? "<br>Campaign: " + esc((CAMPAIGNS[c.campaign] || {}).name || c.campaign) : ""}
+    ${c.posts.map(p => `<br>${esc(p.platform)}: <a href="${esc(p.url)}" target="_blank">${esc(p.url)}</a>`).join("")}
+    ${c.posts.length ? "" : "<br><small>No link saved yet: add it below.</small>"}
+    <div class="row"><button class="small" onclick="markPosted(${c.id}, false)">Undo (back to Approved)</button></div></div>`;
 }
 
 function render() {
@@ -735,7 +881,7 @@ function render() {
   const keep = new Set(clips.map(c => "c" + c.id));
   [...list.children].forEach(el => { if (!keep.has(el.id)) el.remove(); });
   clips.forEach((c, i) => {
-    const sig = c.version + c.status + c.rendering + c.render_error + c.title + c.posts.length;
+    const sig = c.version + c.status + c.rendering + c.render_error + c.title + c.posts.length + c.posted_at + c.removed_at;
     let el = document.getElementById("c" + c.id);
     if (el && el.dataset.sig === sig) { list.appendChild(el); return; }
     const fresh = document.createElement("div");
@@ -762,6 +908,9 @@ function card(c) {
       ${c.ai_score != null ? " · AI " + c.ai_score + "/10" : ""}${ai.category ? " · " + esc(ai.category) : ""}
       ${c.explore ? ' · <b title="A lower-ranked pick, included so the tool can learn if its ranking is right">explore</b>' : ""}</div>
     ${sub ? `<div class="meta">${sub}</div>` : ""}
+    ${c.removed_at ? `<div class="posted" style="background:#4a2323">🗑 Removed ${new Date(c.removed_at * 1000).toLocaleString()}
+       <div class="row"><button class="small" onclick="removeClip(${c.id}, false)">Restore</button></div></div>` : ""}
+    ${c.posted_at && !c.removed_at ? postedInfo(c) : ""}
     ${c.warning ? `<div class="warnbox">⚠ Possible spoiler / cutscene: ${esc(c.warning_reasons.join(", "))}.
        Watch it fully before approving.</div>` : ""}
     ${left !== null ? `<div class="warnbox" style="background:${left > 0 ? "#2e9d4f" : "#c0392b"};color:#fff">
@@ -809,20 +958,23 @@ function card(c) {
       <button ${changed && !c.rendering ? "" : "disabled"} onclick="rerender(${c.id})">Re-render</button>
       ${changed ? `<button onclick="resetDraft(${c.id})">Undo changes</button>` : ""}
     </div>
-    <div class="row">
+    ${c.posted_at || c.removed_at ? "" : `<div class="row">
       ${c.status !== "approved" ? `<button class="approve" ${c.rendering ? "disabled" : ""} onclick="decide(${c.id}, 'approved')">Approve</button>` : ""}
       ${c.status !== "rejected" ? `<button class="reject" onclick="decide(${c.id}, 'rejected')">Reject</button>` : ""}
-      ${c.status !== "pending" ? `<button onclick="decide(${c.id}, 'pending')">Back to pending</button>` : ""}
-    </div>
+      ${c.status !== "pending" ? `<button onclick="decide(${c.id}, 'pending')">Back to review</button>` : ""}
+    </div>`}
     <div class="status" id="s${c.id}">${c.rendering ? "Re-rendering… (this takes up to a minute)" : esc(c.render_error && "Re-render failed: " + c.render_error)}</div>
-    ${c.status === "approved" ? `
-      <label>Posted it? Log the link (one post = one campaign)</label>
+    ${c.status === "approved" && !c.posted_at && !c.removed_at ? `
+      <div class="row"><button class="approve" onclick="markPosted(${c.id}, true)">✅ Mark as posted</button></div>` : ""}
+    ${c.status === "approved" && !c.removed_at ? `
+      <label>Posted it? Log the link (one post = one campaign; this also marks it posted)</label>
       <div class="row"><select id="pf${c.id}"><option>tiktok</option><option>youtube</option><option>instagram</option><option>other</option></select>
         <input id="pu${c.id}" placeholder="https://..."></div>
       <div class="row"><button onclick="logPost(${c.id})">Save post link</button></div>
       ${c.posts.map(p => `<div class="meta">${esc(p.platform)}: <a href="${esc(p.url)}" target="_blank">${esc(p.url)}</a>
         ${p.campaign ? "(" + esc(p.campaign) + ")" : ""} · ${new Date(p.posted_at * 1000).toLocaleString()}</div>`).join("")}` : ""}
-    <div class="meta"><a href="/video/${c.id}?download=1">Download</a></div>`;
+    <div class="row"><a href="/video/${c.id}?download=1" style="flex:1;text-align:center">Download</a>
+      ${c.removed_at ? "" : `<button class="small remove" onclick="removeClip(${c.id}, true)">🗑 Remove</button>`}</div>`;
 }
 
 async function logPost(id) {
