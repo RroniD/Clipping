@@ -15,20 +15,27 @@ baseline_seconds = 300     # rolling window for the robust z-score
 per_user_cap = 2           # count at most this many messages per person per 5-s window (spammers)
 hype_ratio = 0.5           # a message is "hype" if at least this share of its words are hype words
 hype_words = ["kekw", "omegalul", "lul", "lmao", "lmfao", "pog", "pogchamp", "poggers", "pogu",
-              "w", "ww", "www", "monkas", "pepelaugh", "icant", "sadge", "holy", "wtf", "bro",
-              "💀", "😂", "🤣", "😭", "🔥"]
-hype_phrases = ["clip it", "clip that", "no way", "oh my god", "omg"]
+              "w", "ww", "www", "monkas", "monkaw", "pepelaugh", "icant", "sadge", "holy", "wtf", "bro",
+              "clueless", "aware", "d:", "kappa", "sheesh", "goated", "clutch", "nah", "bruh",
+              # GTA: what chat types when something big happens in the game
+              "wasted", "busted", "heist", "cops", "rip",
+              "💀", "😂", "🤣", "😭", "🔥", "😱", "🚔"]
+hype_phrases = ["clip it", "clip that", "no way", "oh my god", "omg", "aint no way", "ain't no way",
+                "bro what", "he got wasted", "5 stars", "five stars", "get out", "go go go", "skill issue"]
 # Chat bots post timers and links, not reactions: their messages are ignored.
 bots = ["fossabot", "nightbot", "streamelements", "streamlabs", "moobot", "wizebot", "sery_bot",
         "soundalerts", "pokemoncommunitygame", "kofistreambot", "botrixoficial", "kickbot"]
 
 [chat.moods]
 # What KIND of reaction chat is having. The AI judge gets the mix (e.g. 70% funny, 20% confusion).
-funny = ["kekw", "omegalul", "lul", "lmao", "lmfao", "icant", "pepelaugh", "lol", "haha", "😂", "🤣", "💀", "😭"]
-hype = ["pog", "pogchamp", "poggers", "pogu", "w", "lets go", "clip it", "clip that", "goat", "🔥", "insane"]
-tense = ["monkas", "monkaw", "😬", "holy", "nervous", "dont", "noooo"]
-confusion = ["huh", "what", "wtf", "wait what", "how", "🤔"]
-fail = ["l", "f", "rip", "unlucky", "noob", "fail", "ratio", "🤡"]
+funny = ["kekw", "omegalul", "lul", "lmao", "lmfao", "icant", "pepelaugh", "lol", "haha", "clueless",
+         "😂", "🤣", "💀", "😭"]
+hype = ["pog", "pogchamp", "poggers", "pogu", "w", "lets go", "clip it", "clip that", "goat", "goated",
+        "sheesh", "clutch", "🔥", "insane"]
+tense = ["monkas", "monkaw", "😬", "😱", "holy", "nervous", "dont", "noooo", "run", "go go go", "get out",
+         "cops", "5 stars", "five stars", "🚔"]
+confusion = ["huh", "what", "wtf", "wait what", "how", "bro what", "🤔"]
+fail = ["l", "f", "rip", "unlucky", "noob", "fail", "ratio", "wasted", "busted", "skill issue", "🤡"]
 
 [audio]
 sample_rate = 8000         # 8 kHz is plenty for loudness and keeps it fast
