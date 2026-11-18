@@ -239,3 +239,31 @@ def test_both_mode_adds_the_original_line_small():
     ass = edit.build_ass(edit.chunk_words(words((0.5, 1.0, "no"), (1.0, 1.5, "way"))), 5.0, "", "", pos, cfg,
                          small_lines=[{"start": 0.5, "end": 1.5, "text": "لا يمكن"}])
     assert ",Original,," in ass and "لا يمكن" in ass
+
+
+def test_action_track_follows_movement_and_is_smooth():
+    n = 12
+    frames = np.zeros((n, 180, 320, 3), dtype=np.uint8)
+    for i in range(n):
+        frames[i, 50:120, 240:300] = 255 * (i % 2)            # something flashing on the right
+    track = edit.action_track(frames, (0, 0, 1, 1), [i * 0.5 for i in range(n)], smooth=3)
+    assert len(track) == n - 1 and all(c > 0.65 for _, c in track)
+    expr = edit.crop_x_expr(track, 1404)
+    assert expr.startswith("max(0,min(iw-ow,") and "lt(t," in expr
+    assert edit.crop_x_expr([], 1404) == "(iw-ow)/2"
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="needs ffmpeg")
+def test_render_with_smart_crop(tmp_path):
+    cfg = load_config()
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30",
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "4",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", str(src)], check=True)
+    lay = edit.layout_for({"layout": "no_facecam"})
+    ass = tmp_path / "work" / "c.ass"
+    ass.parent.mkdir()
+    ass.write_text(edit.build_ass([], 3.0, "", "", edit.text_positions(lay, cfg), cfg), encoding="utf-8")
+    out = edit.render_clip(src, 0.5, 3.0, lay, ass, [], tmp_path / "out.mp4", cfg,
+                           track=[(0.0, 0.3), (1.5, 0.7), (3.0, 0.5)])
+    assert out.exists() and out.stat().st_size > 1000

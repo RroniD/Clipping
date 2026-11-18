@@ -103,7 +103,7 @@ def facecam_height(cfg: dict) -> int:
     return int(round(OUT_H * cfg["edit"]["facecam_share"] / 2)) * 2   # even number for H.264
 
 
-def video_filter(layout: Layout, cfg: dict, inp: str = "[0:v]") -> str:
+def video_filter(layout: Layout, cfg: dict, inp: str = "[0:v]", track=None) -> str:
     """The video part of ffmpeg's filter_complex. Input is `inp` ([0:v]), output is [base]."""
     fps = cfg["edit"]["fps"]
     if layout.mode == "split":
@@ -123,8 +123,51 @@ def video_filter(layout: Layout, cfg: dict, inp: str = "[0:v]") -> str:
     zw = int(round(OUT_W * float(cfg["edit"]["no_facecam_zoom"]) / 2) * 2)
     return (f"{inp}{_crop(layout.gameplay)},split=2[a][b];"
             f"[a]{_fill(270, 480)},boxblur={blur}:2,scale={OUT_W}:{OUT_H},eq=brightness=-0.12[bg];"
-            f"[b]scale={zw}:{OUT_H}:force_original_aspect_ratio=decrease,crop='min(iw,{OUT_W})':ih[fg];"
+            f"[b]scale={zw}:{OUT_H}:force_original_aspect_ratio=decrease,"
+            f"crop='min(iw,{OUT_W})':ih:x='{crop_x_expr(track or [], zw)}'[fg];"
             f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,fps={fps}[base]")
+
+
+def action_track(frames: np.ndarray, box: tuple[float, float, float, float], times: list[float],
+                 smooth: int = 5) -> list[tuple[float, float]]:
+    """Where the action is, left-right, over time: [(t, centre 0..1)].
+
+    For each pair of frames we measure how much every column of the game picture changed; the
+    "centre of movement" is the weighted average column. Then it's smoothed heavily (a moving
+    average over ~5 samples) so the crop glides instead of jittering, and quiet moments fall
+    back towards the middle. Cheap: tiny frames, no extra installs.
+    """
+    x, y, w, h = box
+    H, W = frames.shape[1:3]
+    g = frames[:, int(y * H): int((y + h) * H), int(x * W): int((x + w) * W)].mean(axis=3)
+    if len(g) < 2 or g.shape[2] < 4:
+        return []
+    cols = np.abs(np.diff(g, axis=0)).mean(axis=1)            # (n-1, width): movement per column
+    pos = np.linspace(0, 1, cols.shape[1])
+    energy = cols.sum(axis=1)
+    centre = np.where(energy > 1e-6, (cols * pos).sum(axis=1) / np.maximum(energy, 1e-6), 0.5)
+    # Little movement -> trust it less (pull towards the middle).
+    trust = np.clip(energy / (np.median(energy) + 1e-6), 0, 1)
+    centre = 0.5 + (centre - 0.5) * trust
+    k = max(1, smooth)
+    padded = np.pad(centre, (k // 2, k - 1 - k // 2), mode="edge")
+    centre = np.convolve(padded, np.ones(k) / k, mode="valid")
+    return [(round(t, 2), round(float(c), 3)) for t, c in zip(times[1:], centre)]
+
+
+def crop_x_expr(track: list[tuple[float, float]], scaled_w: int) -> str:
+    """ffmpeg expression for the crop's left edge that follows the track (straight lines between
+    the points), clamped so the crop never leaves the picture."""
+    def x_of(c):
+        return c * scaled_w - OUT_W / 2
+    if not track:
+        return "(iw-ow)/2"
+    expr = f"{x_of(track[-1][1]):.1f}"
+    for (t0, c0), (t1, c1) in reversed(list(zip(track, track[1:]))):
+        x0, x1 = x_of(c0), x_of(c1)
+        expr = f"if(lt(t,{t1:.2f}),{x0:.1f}+({x1 - x0:.1f})*(t-{t0:.2f})/{max(t1 - t0, 0.01):.2f},{expr})"
+    expr = f"if(lt(t,{track[0][0]:.2f}),{x_of(track[0][1]):.1f},{expr})"
+    return f"max(0,min(iw-ow,{expr}))"
 
 
 def text_positions(layout: Layout, cfg: dict) -> dict[str, int]:
@@ -458,7 +501,7 @@ def remap_words(words: list[dict], segments: list[tuple[float, float]], lead_in:
 def render_clip(source: Path, offset: float, duration: float, layout: Layout, ass_path: Path,
                 words: list[dict], out_path: Path, cfg: dict,
                 segments: list[tuple[float, float]] | None = None, zoom_at: float | None = None,
-                audio_file: Path | None = None, safe_overlay: bool = False) -> Path:
+                audio_file: Path | None = None, safe_overlay: bool = False, track=None) -> Path:
     """Render one finished clip with a single ffmpeg call.
 
     segments: the parts of [0, duration] to keep, in order (dead air cut out; a teaser is just
@@ -491,7 +534,7 @@ def render_clip(source: Path, offset: float, duration: float, layout: Layout, as
             joins += f"[v{i}][a{i}]"
         parts.append(f"{joins}concat=n={len(segments)}:v=1:a=1[vcat][acat]")
         v_label, a_label = "[vcat]", "[acat]"
-    parts.append(video_filter(layout, cfg, v_label))
+    parts.append(video_filter(layout, cfg, v_label, track))
     last = "[base]"
     if zoom_at is not None and e["zoom"]:
         # Punch-in: for a moment the whole picture is scaled up ~12% (centre crop), a classic
@@ -808,6 +851,20 @@ class ClipRenderer:
         words_edit = remap_words(caption_words, main, lead_in)
         zoom_at = remap(peak, main, lead_in)
 
+        # Smart crop: in the "game + blurred background" layout the game is wider than the screen;
+        # follow the action left/right instead of always showing the middle.
+        track = None
+        if layout.mode == "no_facecam" and e["smart_crop"] and e["no_facecam_zoom"] > 1:
+            from clipper.layoutcheck import rgb_frames
+            try:
+                n = max(4, int(duration * 2))
+                fr = rgb_frames(source, offset, offset + duration, n=n)
+                times = [i * duration / max(1, len(fr)) for i in range(len(fr))]
+                raw_track = action_track(fr, layout.gameplay, times, smooth=int(e["smart_crop_smooth"]))
+                track = [(t2, c) for t, c in raw_track if (t2 := remap(t, main, lead_in)) is not None]
+            except Exception:
+                track = None   # fall back to the centre crop
+
         # 4. Subtitle file: captions, hook, context banner, campaign disclosure, credit.
         ai = d.get("ai") or {}
         if hook is None:
@@ -831,7 +888,7 @@ class ClipRenderer:
         audio_file, music_warning = remove_music(source, offset, duration, work, cfg)
         final = render_clip(source, offset, duration, layout, ass_path, words, out_dir / "final" / f"{name}.mp4",
                             cfg, segments=segments, zoom_at=zoom_at, audio_file=audio_file,
-                            safe_overlay=safe_overlay)
+                            safe_overlay=safe_overlay, track=track)
         if e["cover"]:
             save_cover(final, zoom_at if zoom_at is not None else min(1.0, edited / 2), final.with_suffix(".jpg"))
         (work / f"{name}.json").write_text(json.dumps(
