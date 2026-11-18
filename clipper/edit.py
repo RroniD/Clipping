@@ -525,6 +525,17 @@ def save_cover(video: Path, at: float, out: Path) -> Path | None:
 
 # --------------------------------------------------------------------------- music removal (optional)
 
+def demucs_python() -> Path | None:
+    """Demucs lives in its OWN Python environment (.venv-demucs), because it brings PyTorch
+    with its own copies of NVIDIA libraries, which could break faster-whisper's GPU setup in
+    the main environment. We just run that environment's python as a separate program."""
+    for rel in ("Scripts/python.exe", "bin/python"):
+        p = PROJECT_ROOT / ".venv-demucs" / rel
+        if p.exists():
+            return p
+    return None
+
+
 def remove_music(source: Path, offset: float, duration: float, work: Path, cfg: dict) -> tuple[Path | None, str]:
     """Optional: split the clip's audio into voice + everything else with Demucs and mix the
     'everything else' (music AND game sounds) far down. Returns (audio file or None, warning).
@@ -535,29 +546,33 @@ def remove_music(source: Path, offset: float, duration: float, work: Path, cfg: 
     """
     if cfg["audio"]["music_removal"] != "demucs":
         return None, ""
-    try:
-        import demucs  # noqa: F401
-    except ImportError:
+    python = demucs_python()
+    if python is None:
         return None, ""
     ffmpeg = fetch.require_tool("ffmpeg", "Install it with: winget install Gyan.FFmpeg")
     work.mkdir(parents=True, exist_ok=True)
     wav = work / f"{source.stem}_{offset:.0f}.wav"
     subprocess.run([ffmpeg, "-v", "error", "-y", "-ss", f"{offset:.3f}", "-t", f"{duration:.3f}",
                     "-i", str(source), "-vn", "-ac", "2", "-ar", "44100", str(wav)], check=True)
-    sep = subprocess.run([sys.executable, "-m", "demucs", "--two-stems=vocals", "-n", "htdemucs",
-                          "-o", str(work / "demucs"), str(wav)], capture_output=True, text=True)
+    sep = subprocess.run([str(python), "-m", "demucs", "--two-stems=vocals", "-n", "htdemucs",
+                          "-o", str(work / "demucs"), str(wav)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
     stems = work / "demucs" / "htdemucs" / wav.stem
     voice, rest = stems / "vocals.wav", stems / "no_vocals.wav"
     if sep.returncode != 0 or not voice.exists():
-        return None, ""
+        return None, "music removal failed: check for copyrighted music before posting"
     v_db = float(np.mean(clip_levels(voice, 0, duration, 1.0)))
     r_db = float(np.mean(clip_levels(rest, 0, duration, 1.0)))
-    warning = "loud background music (copyright-claim risk)" if r_db > v_db - 6 else ""
+    if r_db <= v_db - cfg["audio"]["music_loud_db"]:
+        # Background is quiet next to the voice: keep the original sound. In GTA the
+        # "background" is also crashes, sirens and explosions, which are part of the moment.
+        return None, ""
     mixed = work / f"{wav.stem}_clean.wav"
+    down = float(cfg["audio"]["music_down_db"])
     subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(voice), "-i", str(rest), "-filter_complex",
-                    "[1:a]volume=-15dB[r];[0:a][r]amix=inputs=2:normalize=0[a]", "-map", "[a]", str(mixed)],
+                    f"[1:a]volume=-{down}dB[r];[0:a][r]amix=inputs=2:normalize=0[a]", "-map", "[a]", str(mixed)],
                    check=True)
-    return mixed, warning
+    return mixed, f"loud background music was turned down {down:.0f} dB (check the sound before posting)"
 
 
 def _words_for(d: dict, clip_start: float, clip_end: float) -> list[dict] | None:
@@ -892,6 +907,12 @@ def main() -> None:
     finals = render_vod(out_dir, cfg, args.top_n, only, args.include_warnings, not args.no_captions,
                         args.layout, args.campaign, args.safe_overlay)
     print(f"{len(finals)} finished clip(s) in {out_dir / 'final'}")
+    if finals:
+        from dotenv import load_dotenv
+        from clipper import notify
+        load_dotenv(PROJECT_ROOT / ".env")
+        notify.send(f"{len(finals)} clips ready", f"{out_dir.parent.name}: open the review queue to approve them.",
+                    click=notify.queue_url(cfg))
 
 
 if __name__ == "__main__":

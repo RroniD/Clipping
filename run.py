@@ -288,6 +288,12 @@ def main() -> None:
     for i, d in enumerate(results):
         d["kept"] = i in kept or i in explore
         d["explore"] = i in explore
+    from clipper import dedupe
+    n_overlap = dedupe.drop_overlaps(results)
+    n_live = dedupe.drop_already_clipped(results, dedupe.live_peaks_for(out_dir.parent, framecheck.recorded_at(info)),
+                                         cfg["peaks"]["min_gap_seconds"])
+    if n_overlap or n_live:
+        print(f"    skipped duplicates: {n_overlap} overlapping, {n_live} already clipped in live mode")
     final_order = [i for i in range(len(results)) if results[i]["kept"]] + \
                   [i for i in range(len(results)) if not results[i]["kept"]]
     results = [results[i] for i in final_order]

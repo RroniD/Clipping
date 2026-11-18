@@ -270,7 +270,17 @@ class StreamBuffer:
         folder.mkdir(parents=True, exist_ok=True)
 
     def ensure_running(self) -> None:
-        """Start ffmpeg, or restart it after a disconnect (with a growing wait between tries)."""
+        """Start ffmpeg, or restart it after a disconnect (with a growing wait between tries).
+        Also the disk guard: with less than `min_free_gb` free, recording pauses (a full disk
+        would break Windows and every program on it), and resumes when space is back."""
+        import shutil as _shutil
+        free_gb = _shutil.disk_usage(self.folder).free / 1e9
+        if free_gb < self.cfg["min_free_gb"]:
+            if self.proc is not None and self.proc.poll() is None:
+                log(self.name, f"only {free_gb:.1f} GB free on the disk: recording paused. Free some space "
+                               "(delete old folders in out\\) and it continues by itself.")
+                self.stop()
+            return
         if self.proc is not None and self.proc.poll() is None:
             return
         if time.time() < self.next_try:
@@ -577,6 +587,7 @@ class ClipJob:
     def __init__(self, session: Session, cand: Candidate, source: Path, source_start: float, source_end: float):
         self.session, self.cand, self.source = session, cand, source
         self.source_start, self.source_end = source_start, source_end
+        self.waited = session.now() - cand.peak   # seconds from the moment until it was cut
 
 
 class ClipWorker(threading.Thread):
@@ -696,8 +707,15 @@ class ClipWorker(threading.Thread):
             db.close()
         job.source.unlink(missing_ok=True)
         warn = " ⚠ " + ", ".join(d["warning_reasons"]) if d["warning"] else ""
+        latency = s.now() - c.peak
         log(s.name, f"clip ready in the review queue: {final.name} "
-                    f"({time.time() - t0:.0f} s to process, {s.now() - c.peak:.0f} s after the moment){warn}")
+                    f"({time.time() - t0:.0f} s to process, {latency:.0f} s after the moment){warn}")
+        # Keep a record of how fast each clip was (moment -> in the queue), for tuning.
+        with (s.dir / "latency.log").open("a", encoding="utf-8") as f:
+            f.write(f"{hms(c.peak)}\tconfirmed+cut {job.waited:.0f}s\tprocessed {time.time() - t0:.0f}s"
+                    f"\ttotal {latency:.0f}s\n")
+        from clipper import notify
+        notify.clip_ready(s.name, d, notify.queue_url(cfg))
 
 
 # --------------------------------------------------------------------------- main loop
@@ -718,6 +736,8 @@ def live_cfg(cfg: dict) -> dict:
     running on the same laptop doesn't stutter while a clip renders."""
     cfg = json.loads(json.dumps(cfg))   # deep copy
     cfg["edit"]["threads"] = cfg["live"]["x264_threads"]
+    if not cfg["live"]["music_removal"]:
+        cfg["audio"]["music_removal"] = "off"   # speed first in live mode (adds ~1 min per clip)
     if cfg["live"].get("whisper_model"):
         cfg["whisper"]["model"] = cfg["live"]["whisper_model"]
     return cfg

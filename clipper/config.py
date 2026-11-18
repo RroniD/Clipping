@@ -150,7 +150,11 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                                          'busted',
                                          'skill issue',
                                          '🤡']}},
-    'audio': {'sample_rate': 8000, 'baseline_seconds': 300, 'music_removal': 'off'},
+    'audio': {   'sample_rate': 8000,
+                 'baseline_seconds': 300,
+                 'music_removal': 'demucs',
+                 'music_loud_db': 6,
+                 'music_down_db': 15},
     'signals': {   'floor': {   'chat': 3.0,
                                 'unique': 2.0,
                                 'hype': 1.0,
@@ -294,11 +298,13 @@ DEFAULTS: dict = {   'general': {'top_n': 15, 'top_n_detect': 40, 'explore_share
                 'confirm_seconds': 45,
                 'max_peaks_per_check': 10,
                 'buffer_minutes': 6,
+                'min_free_gb': 5,
                 'segment_seconds': 10,
                 'buffer_format': 'best[height<=1080]/best',
                 'x264_threads': 4,
                 'whisper_model': '',
-                'min_quality': 4.5}}
+                'min_quality': 4.5,
+                'music_removal': False}}
 
 
 

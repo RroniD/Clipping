@@ -40,8 +40,11 @@ fail = ["l", "f", "rip", "unlucky", "noob", "fail", "ratio", "wasted", "busted",
 [audio]
 sample_rate = 8000         # 8 kHz is plenty for loudness and keeps it fast
 baseline_seconds = 300
-music_removal = "off"      # "demucs" removes background music from finished clips, IF demucs is
-                           # installed (pip install demucs; large download, see README). "off" = never.
+music_removal = "demucs"   # "demucs" = when a clip's background music is LOUD (copyright-claim risk),
+                           # split voice from background and turn the background down. Needs the
+                           # separate .venv-demucs environment (see README). "off" = never.
+music_loud_db = 6          # "loud" = background less than 6 dB quieter than the voice
+music_down_db = 15         # how much to turn loud background down
 
 [signals]
 # The robust z-score divides by the spread of the signal. When chat is dead the spread is 0,
@@ -217,8 +220,10 @@ edge_seconds = 60          # ignore peaks this close to the window's oldest edge
 confirm_seconds = 45       # a peak counts only after its reaction has played out (30-60 s)
 max_peaks_per_check = 10
 buffer_minutes = 6         # keep this many minutes of recorded stream on disk
+min_free_gb = 5            # pause recording if the disk has less free space than this
 segment_seconds = 10       # the recording is saved in pieces this long
 buffer_format = "best[height<=1080]/best"
 x264_threads = 4           # CPU threads for rendering clips (fewer = smoother game/stream alongside)
 whisper_model = ""         # e.g. "small" to use less GPU while gaming; "" = same as [whisper]
 min_quality = 4.5          # AI quality below this (1-10): saved for learning, but not edited into a clip
+music_removal = false      # music removal takes ~40-70 s per clip on this laptop: off live, to stay fast
