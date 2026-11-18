@@ -46,6 +46,7 @@ REACTIONS = ("none", "mild", "big")
 # $ per million tokens (input, output), list prices Nov 2026. Haiku's price is for prompts up
 # to 100K tokens, which ours always are.
 PRICES = {"claude-haiku-5-5": (0.10, 0.50), "claude-sonnet-5-5": (2.0, 10.0), "claude-opus-5-5": (4.0, 20.0)}
+# (Cached prompt tokens cost less; we count them at the full price, so real costs are a bit lower.)
 
 # JSON Schema the API must follow. "additionalProperties: false" + "required" means the
 # answer has exactly these fields, no more, no fewer.
@@ -190,6 +191,46 @@ first. What matters most: a stranger understands it instantly, the first 2 secon
 is strong, and it's the kind of moment people share or rewatch. Return every id exactly once."""
 
 
+POLISH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "hook_options": {"type": "array", "items": {"type": "string"}},
+        "hook": {"type": "string"},
+        "title_options": {"type": "array", "items": {"type": "string"}},
+        "title": {"type": "string"},
+        "context_line": {"type": "string"},
+        "punch_words": {"type": "array", "items": {"type": "string"}},
+        "caption": {"type": "string"},
+        "hashtags": {"type": "array", "items": {"type": "string"}},
+        "spoiler_risk": {"type": "string", "enum": list(SPOILER_LEVELS)},
+    },
+    "required": ["hook_options", "hook", "title_options", "title", "context_line", "punch_words", "caption",
+                 "hashtags", "spoiler_risk"],
+    "additionalProperties": False,
+}
+
+POLISH_PROMPT = """You write the packaging for short vertical clips cut from livestreams (mostly GTA), \
+for a clipper paid per 1,000 views on TikTok / YouTube Shorts / Instagram Reels. The clip is already \
+chosen and cut; another model rated it. You get the transcript (seconds from the clip start), the \
+chat's mood, that model's notes, and a few frames. Your job is the words that make people stop \
+scrolling and watch to the end.
+
+- hook_options: 3 DIFFERENT on-screen hooks for the first 2 seconds, 3-6 words each, from different \
+angles (a question, the stakes, a reaction). Create curiosity; NEVER give away the payoff ("He's \
+about to..." beats "He won"). No generic hooks ("insane moment"), no lies, no spoilers. \
+hook = the strongest one.
+- title_options: 2 titles under 70 characters that tell a tiny story (setup + twist) and include the \
+streamer's name. title = the better one.
+- context_line: at most 10 words that tell a stranger who and what this is, shown as a banner. \
+Specific and true.
+- punch_words: 1-2 single words that are actually SAID and carry the moment; they get highlighted.
+- caption: one natural TikTok caption under 100 characters that invites comments (no hashtags).
+- hashtags: 5-8 without '#': streamer name, game, moment type, 1-2 broad ones.
+- spoiler_risk: "high" if it shows or discusses a story cutscene, plot reveal, mission ending or the \
+game's ending; "low" if it might touch the story; else "none". When unsure pick the higher one.
+If the streamer speaks another language, write everything in English."""
+
+
 class JudgeOutputError(ValueError):
     """The model's answer was missing, refused, or had values outside the allowed ranges."""
 
@@ -211,6 +252,14 @@ class JudgeConfig:
         return cls(model=j["model"], effort=j["effort"], max_candidates=int(j["max_candidates"]),
                    max_tokens=int(j["max_tokens"]), chat_sample=int(j["chat_sample"]),
                    fallbacks=bool(j["fallbacks"]), frames=int(j["frames"]), frame_width=int(j["frame_width"]))
+
+
+# Neutral values for fields a partial answer might lack (used when re-validating merged answers).
+GOOD_DEFAULTS = {"category": "other", "standalone": 5, "hook_strength": 5, "payoff": 5, "score": 5,
+                 "visual_payoff": 5, "facecam_reaction": "none", "is_cutscene": False, "menu_or_map": False,
+                 "layout": None, "hook_options": [], "title_options": [], "punch_words": [], "caption": "",
+                 "story_beat": False, "translations": [], "context_line": "", "hashtags": [], "reason": "",
+                 "setup_start": 0, "cut_start": 0, "cut_end": 30}
 
 
 # --------------------------------------------------------------------------- validation
@@ -416,35 +465,54 @@ class Judge:
             client = anthropic.Anthropic(max_retries=5)
         self.client = client
         self.tokens_in = self.tokens_out = 0
+        self.usage: dict[str, list[int]] = {}   # model -> [input tokens, output tokens]
 
     def cost(self) -> float | None:
-        """Dollars spent so far (list prices, Nov 2026; None for a model not in the table)."""
-        per_million = PRICES.get(self.cfg.model)
-        if per_million is None:
-            return None
-        return self.tokens_in / 1e6 * per_million[0] + self.tokens_out / 1e6 * per_million[1]
+        """Dollars spent so far, all models (list prices, Nov 2026; None if a model isn't in the table)."""
+        total = 0.0
+        for model, (tin, tout) in self.usage.items():
+            per_million = PRICES.get(model)
+            if per_million is None:
+                return None
+            total += tin / 1e6 * per_million[0] + tout / 1e6 * per_million[1]
+        return total
 
-    def _ask(self, system: str, content, schema: dict, max_tokens: int | None = None) -> dict:
+    def cost_report(self) -> str:
+        parts = []
+        for model, (tin, tout) in self.usage.items():
+            p = PRICES.get(model)
+            price = f" = ${tin / 1e6 * p[0] + tout / 1e6 * p[1]:.4f}" if p else ""
+            parts.append(f"{model}: {tin:,} in + {tout:,} out{price}")
+        return "; ".join(parts) or "no AI calls"
+
+    def _ask(self, system, content, schema: dict, max_tokens: int | None = None, model: str | None = None) -> dict:
+        model = model or self.cfg.model
         request = dict(
-            model=self.cfg.model,
+            model=model,
             max_tokens=max_tokens or self.cfg.max_tokens,
             system=system,
             messages=[{"role": "user", "content": content}],
             # effort "low": a quick judgement; more thinking costs more without much gain.
+            # (Sonnet's default is "high", so it must be set explicitly.)
             # "format" forces the answer to match our schema.
             output_config={"effort": self.cfg.effort, "format": {"type": "json_schema", "schema": schema}},
         )
         # Server-side fallback (retry on another model if this one declines, e.g. a safety-filter
         # false positive on GTA violence) exists for the bigger models, not for Haiku.
-        if self.cfg.fallbacks and "haiku" not in self.cfg.model:
+        if self.cfg.fallbacks and "haiku" not in model:
             request.update(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
             response = self.client.beta.messages.create(**request)
         else:
             response = self.client.messages.create(**request)
         usage = getattr(response, "usage", None)
         if usage is not None:   # add up what this run costs (printed at the end)
-            self.tokens_in += int(getattr(usage, "input_tokens", 0) or 0)
-            self.tokens_out += int(getattr(usage, "output_tokens", 0) or 0)
+            tin = int(getattr(usage, "input_tokens", 0) or 0) + int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+            tout = int(getattr(usage, "output_tokens", 0) or 0)
+            self.tokens_in += tin
+            self.tokens_out += tout
+            u = self.usage.setdefault(model, [0, 0])
+            u[0] += tin
+            u[1] += tout
 
         if response.stop_reason == "refusal":
             raise JudgeOutputError("the model declined to rate this clip")
@@ -471,6 +539,36 @@ class Judge:
             except JudgeOutputError as exc:
                 last_error = exc
         raise JudgeOutputError(f"gave up after 2 tries: {last_error}")
+
+    def polish(self, d: dict, streamer: str, words, frames: list[tuple[float, bytes]], model: str) -> dict:
+        """Second, smarter pass for a KEPT clip: better hooks, titles, caption, punch words, and a
+        spoiler re-check. Returns the new packaging fields (validated)."""
+        lines = transcript_lines(words, d["start"], d["end"])
+        transcript = "\n".join(f"[{a - d['start']:.1f}-{b - d['start']:.1f}] {t}" for a, b, t in lines) \
+            or "(no speech)"
+        ai = d.get("ai") or {}
+        mood = ", ".join(f"{k} {v}%" for k, v in (d.get("chat_mood") or {}).items()) or "unknown"
+        notes = (f"category {ai.get('category')}, score {ai.get('score')}/10, makes sense alone "
+                 f"{ai.get('standalone')}/10, payoff {ai.get('payoff')}/10, visual {ai.get('visual_payoff')}/10, "
+                 f"facecam reaction {ai.get('facecam_reaction')}. What happens: {ai.get('reason', '')}")
+        text = (f"Streamer: {streamer}\nClip length: {d['end'] - d['start']:.0f} s; the key moment is at "
+                f"{d['peak'] - d['start']:.0f} s.\nChat mood: {mood}\nOther model's notes: {notes}\n"
+                + (f"Language: {d['language']} (write in English)\n" if d.get("language", "en") != "en" else "")
+                + f"\nTranscript:\n{transcript}\n")
+        content = [{"type": "text", "text": text}]
+        for t, jpeg in frames:
+            content.append({"type": "text", "text": f"Frame at {t - d['start']:.1f} s:"})
+            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                         "data": base64.standard_b64encode(jpeg).decode("ascii")}})
+        # The fixed instructions go first with cache_control, so repeated calls can reuse them.
+        system = [{"type": "text", "text": POLISH_PROMPT, "cache_control": {"type": "ephemeral"}}]
+        data = self._ask(system, content, POLISH_SCHEMA, model=model)
+        base = {**GOOD_DEFAULTS, **ai, **data}
+        cleaned = validate({**base, "cut_start": ai.get("cut_start", 0), "cut_end": ai.get("cut_end", 30),
+                            "setup_start": ai.get("setup_start", 0)})
+        keys = ("hook_options", "hook", "title_options", "title", "context_line", "punch_words", "caption",
+                "hashtags", "spoiler_risk")
+        return {k: cleaned[k] for k in keys}
 
     def rank(self, summaries: list[dict]) -> list[int]:
         """One call that orders all judged clips best-first. Returns their ids."""
@@ -542,6 +640,59 @@ def fit_length(start: float, end: float, peak: float, clip_cfg: dict, words=None
 
 
 # --------------------------------------------------------------------------- local cutscene check
+
+RISK_ORDER = {"none": 0, "low": 1, "high": 2}
+
+
+def pick_frames(frames: list[tuple[float, bytes]], d: dict, n: int = 4) -> list[tuple[float, bytes]]:
+    """n frames for the polish pass: the start, just before the moment, the moment, the reaction."""
+    if not frames:
+        return []
+    wanted = [d["start"] + 1, d["peak"] - 2, d["peak"], d["peak"] + 3][:n]
+    chosen = []
+    for t in wanted:
+        best = min(frames, key=lambda f: abs(f[0] - t))
+        if best not in chosen:
+            chosen.append(best)
+    return chosen
+
+
+def polish_kept(results: list[dict], extras: dict, cfg: dict, streamer: str, judge: "Judge | None",
+                log=print) -> int:
+    """Second pass with a smarter model (judge.hook_model) on the kept clips only: better hooks,
+    titles, caption and punch words. Its spoiler verdict can only make a clip STRICTER.
+    extras: id(d) -> (words, frames). Returns how many clips were polished."""
+    j = cfg["judge"]
+    model = j.get("hook_model") or ""
+    if not model or judge is None:
+        return 0
+    import anthropic
+    done = 0
+    targets = [d for d in results if d.get("kept") and d.get("ai")][: int(j["hook_top_n"])]
+    for d in targets:
+        words, frames = extras.get(id(d), (None, []))
+        try:
+            new = judge.polish(d, streamer, words, pick_frames(frames, d, int(j["hook_frames"])), model)
+        except JudgeOutputError as exc:
+            if "declined" in str(exc):
+                d.setdefault("extra_warnings", []).append("the hook-writing AI declined this clip: check it")
+            log(f"    {d['peak_time']}: kept the first AI's hooks ({exc})")
+            continue
+        except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
+            log(f"    {d['peak_time']}: kept the first AI's hooks (API error: {exc})")
+            continue
+        ai = d["ai"]
+        d["first_hook"] = ai.get("hook")
+        risk = max(ai["spoiler_risk"], new.pop("spoiler_risk"), key=lambda r: RISK_ORDER[r])
+        ai.update(new)
+        ai["spoiler_risk"] = risk
+        ai["hook_model"] = model
+        d["warning_reasons"] = warning_reasons(ai, d.get("quiet_stretch_seconds"), cfg,
+                                               d.get("framecheck_reasons", []) + d.get("extra_warnings", []))
+        d["warning"] = bool(d["warning_reasons"])
+        done += 1
+    return done
+
 
 def quiet_stretch(start: float, end: float, words, chat_z: np.ndarray | None,
                   chat_quiet_z: float) -> int | None:

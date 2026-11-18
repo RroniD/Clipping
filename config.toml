@@ -153,6 +153,10 @@ warn_on = ["high"]            # spoiler_risk levels that get the warning flag ("
 cutscene_quiet_seconds = 12   # flag clips with this many seconds of no speech + quiet chat
 chat_quiet_z = 0.0            # "quiet chat" = chat z-score at or below this
 neutral_score = 5             # AI score used for clips that couldn't be judged
+hook_model = "claude-sonnet-5-5"  # smarter model that rewrites hooks/titles/caption for the KEPT clips
+                              # (~$0.005 per clip). "" = off, Haiku's hooks are used.
+hook_top_n = 15               # how many kept clips get the smarter hooks
+hook_frames = 4               # frames it sees (fewer than the first judge, to keep it cheap)
 rank_weight = 0.3             # how much the side-by-side ranking counts vs. each clip's own score
 signal_power = 0.5            # final score = signal^0.5 x AI^2: once a moment passed the detector,
 ai_power = 2.0                # how GOOD it is matters more than how loud chat was

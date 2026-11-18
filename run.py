@@ -292,10 +292,8 @@ def main() -> None:
         judge = Judge(cfg)
     judge_all(results, words_list, messages, z.get("chat"), cfg, streamer, info.get("title", ""), judge,
               frames_per_candidate=frames_list, viewer_clips=clips, vod_length=float(n_seconds))
-    if judge is not None:
-        cost = judge.cost()
-        print(f"    AI judge used {judge.tokens_in:,} input + {judge.tokens_out:,} output tokens"
-              + (f" = ${cost:.4f}" if cost is not None else ""))
+    # Words and frames per candidate, by identity: the list order changes when we rank below.
+    extras = {id(d): (w, f) for d, w, f in zip(results, words_list, frames_list)}
     for d, words in zip(results, words_list):
         if words is not None:
             d["transcript"] = words_between(words, d["start"], d["end"])
@@ -333,6 +331,15 @@ def main() -> None:
     candidates = [candidates[i] for i in final_order]
     for rank, d in enumerate(results, 1):
         d["rank"] = rank
+    # Smarter hooks/titles/captions for the kept clips only (judge.hook_model), then the cost.
+    if judge is not None:
+        from clipper.judge import polish_kept
+        n_pol = polish_kept(results, extras, cfg, streamer, judge)
+        if n_pol:
+            print(f"    {cfg['judge']['hook_model']} rewrote the hooks of {n_pol} kept clip(s)")
+        print(f"    AI cost: {judge.cost_report()}"
+              + (f" | total ${judge.cost():.4f}" if judge.cost() is not None else ""))
+
     # Pick split / no_facecam / crop per kept clip: streamers switch scenes, and a webcam box
     # that shows chat instead of a face would end up on top of the vertical clip.
     if cfg["layout"]["auto"]:
@@ -370,7 +377,7 @@ def main() -> None:
                                            "streamer": streamer, "title": info.get("title", ""),
                                            "vod_seconds": n_seconds, "chat_lag": cfg["chat"]["lag_seconds"],
                                            "judge_model": cfg["judge"]["model"] if judge else None,
-                                           "judge_tokens": [judge.tokens_in, judge.tokens_out] if judge else None,
+                                           "judge_tokens": judge.usage if judge else None,
                                            "judge_cost": round(judge.cost() or 0, 5) if judge else None,
                                            "signals": sorted(raw), "candidates": results},
                                           indent=2, ensure_ascii=False), encoding="utf-8")

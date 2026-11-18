@@ -693,6 +693,10 @@ class ClipWorker(threading.Thread):
         # Live clips are rendered one by one, so a weak moment would waste a render and your time:
         # if the AI rated it below `live.min_quality`, it's saved (for learning) but not edited.
         d["kept"] = not (d["ai"] and d["ai_quality"] < cfg["live"]["min_quality"])
+        if d["kept"] and self.judge is not None:
+            from clipper.judge import polish_kept   # smarter hooks/titles for the clip we'll make
+            polish_kept([d], {id(d): (raw, frames)}, cfg, s.name, self.judge,
+                        log=lambda text: log(s.name, text.strip()))
         data["candidates"].append(d)
         cands_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         if not d["kept"]:

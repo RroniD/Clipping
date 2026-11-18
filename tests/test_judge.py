@@ -294,3 +294,28 @@ def test_translations_are_matched_to_line_times():
     assert d["translated_segments"] == [[101.0, 102.0, "no puede.", "no way"], [105.0, 105.5, "mira", "look"]]
     sent = client.calls[0]["messages"][0]["content"][0]["text"]
     assert "NOT English" in sent and "#1 [6.0-7.0] no puede." in sent
+
+
+def test_polish_pass_rewrites_hooks_and_only_tightens_spoilers():
+    first = {**GOOD, "spoiler_risk": "low"}
+    better = {"hook_options": ["He's about to...", "5 stars incoming", "Chat warned him"], "hook": "He's about to...",
+              "title_options": ["Speed vs the cops", "Speed's worst getaway"], "title": "Speed vs the cops",
+              "context_line": "Speed tries to escape 5 stars", "punch_words": ["run"],
+              "caption": "he did not think this through", "hashtags": ["ishowspeed", "gta6"],
+              "spoiler_risk": "none"}                     # Sonnet says "none": must NOT clear Haiku's "low"
+    client = FakeClient([reply(first), reply(better)])
+    judge = Judge(CFG, client=client)
+    d = _results()[0]
+    judge_all([d], [[]], [], np.ones(400), CFG, "s", "t", judge, log=lambda *_: None)
+    d["kept"] = True
+    from clipper.judge import polish_kept
+    frames = [(t, b"\xff\xd8x") for t in (5, 10, 15, 20, 25, 30)]
+    assert polish_kept([d], {id(d): ([], frames)}, CFG, "speed", judge, log=lambda *_: None) == 1
+    call = client.calls[1]
+    assert call["model"] == "claude-sonnet-5-5" and call["fallbacks"] == "default"
+    assert call["output_config"]["effort"] == "low" and "temperature" not in call
+    assert call["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert sum(1 for c in call["messages"][0]["content"] if c["type"] == "image") <= 4
+    assert d["ai"]["hook"] == "He's about to..." and d["first_hook"] == "He did NOT see that coming"
+    assert d["ai"]["spoiler_risk"] == "low" and d["warning"]      # stricter verdict kept
+    assert "claude-sonnet-5-5" in judge.usage or judge.usage == {}
