@@ -739,7 +739,8 @@ PAGE = r"""<!doctype html>
   body { margin:0; font:16px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--text); }
   header { position:sticky; top:0; z-index:2; background:#000; display:flex; flex-wrap:wrap; gap:6px; padding:8px; }
   header button { flex:1 1 30%; padding:10px 4px; font-size:14px; }
-  .posted { background:#1f4d2e; border-radius:8px; padding:8px; margin:8px 0; }
+  .posted { background:#1f4d2e; border-radius:8px; padding:8px; margin:8px 0; overflow-wrap:anywhere; }
+  .meta { overflow-wrap:anywhere; }
   .small { padding:8px; font-size:14px; }
   .remove { background:#4a2323; }
   main { max-width:560px; margin:0 auto; padding:10px; }
