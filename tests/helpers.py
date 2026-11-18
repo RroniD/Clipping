@@ -11,4 +11,7 @@ def spec_config() -> dict:
     cfg["chat"]["lag_seconds"] = 6
     cfg["weights"].update({"chat": 1.0, "unique": 0.8, "hype": 1.2, "audio": 0.7, "viewer_clips": 1.5,
                            "spam": 0.6, "newcomers": 0.0, "caps": 0.0})
+    # The hand formula: the learned scorer was trained on real Speed chat timing, not on these
+    # synthetic moments (it has its own tests in test_learned.py).
+    cfg["scoring"]["scorer"] = "hand"
     return cfg
